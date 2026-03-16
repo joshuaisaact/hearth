@@ -33,14 +33,16 @@ export function getSnapshotDir(): string {
   return SNAPSHOT_DIR;
 }
 
-async function createBaseSnapshotIfNeeded(): Promise<void> {
-  if (
+export function hasBaseSnapshot(): boolean {
+  return (
     existsSync(join(SNAPSHOT_DIR, VMSTATE_NAME)) &&
     existsSync(join(SNAPSHOT_DIR, MEMORY_NAME)) &&
     existsSync(join(SNAPSHOT_DIR, ROOTFS_NAME))
-  ) {
-    return;
-  }
+  );
+}
+
+async function createBaseSnapshotIfNeeded(): Promise<void> {
+  if (hasBaseSnapshot()) return;
 
   mkdirSync(SNAPSHOT_DIR, { recursive: true });
   copyFileSync(getRootfsPath(), join(SNAPSHOT_DIR, ROOTFS_NAME));

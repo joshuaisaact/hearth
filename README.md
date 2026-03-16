@@ -41,33 +41,15 @@ Cloud sandboxes (E2B, Daytona, Modal) add latency, cost, and a dependency on som
 
 macOS/Windows: use WSL2 or a Linux VM. Firecracker requires KVM.
 
-## Setup (manual, v0.1)
+## Setup
 
-Automated `npx hearth setup` is coming in v0.2. For now:
+Requires Docker and Zig on PATH.
 
 ```bash
-# 1. Download Firecracker
-mkdir -p ~/.hearth/bin
-cd ~/.hearth/bin
-curl -fSL "https://github.com/firecracker-microvm/firecracker/releases/download/v1.15.0/firecracker-v1.15.0-$(uname -m).tgz" -o fc.tgz
-tar xzf fc.tgz
-mv release-v1.15.0-$(uname -m)/firecracker-v1.15.0-$(uname -m) firecracker
-mv release-v1.15.0-$(uname -m)/jailer-v1.15.0-$(uname -m) jailer
-chmod +x firecracker jailer
-rm -rf release-v1.15.0-* fc.tgz
-
-# 2. Download guest kernel
-mkdir -p ~/.hearth/bases
-ARCH="$(uname -m)"
-KERNEL=$(curl -s "http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/v1.15/$ARCH/vmlinux-&list-type=2" \
-  | grep -oP "(?<=<Key>)(firecracker-ci/v1.15/$ARCH/vmlinux-[0-9.]+)(?=</Key>)" | sort -V | tail -1)
-curl -fSL "https://s3.amazonaws.com/spec.ccfc.min/$KERNEL" -o ~/.hearth/bases/vmlinux
-
-# 3. Build rootfs (requires Docker + Zig)
-cd /path/to/hearth
-cd agent && zig build && cd ..
-# Then build a rootfs with the agent baked in — see docs/design-docs/firecracker-integration.md
+npx hearth setup
 ```
+
+This downloads Firecracker v1.15.0, the guest kernel, builds the Zig agent, creates an Ubuntu rootfs via Docker, and captures a base snapshot. Takes ~1-2 minutes on first run, idempotent on subsequent runs.
 
 ## API
 
@@ -108,6 +90,16 @@ Read a file from the sandbox.
 const content = await sandbox.readFile("/etc/hostname");
 ```
 
+### `sandbox.forwardPort(guestPort)`
+
+Forward a guest TCP port to a random host port via vsock tunnel. No root or TAP devices required.
+
+```typescript
+await sandbox.exec("busybox httpd -p 8080 -h /tmp/www");
+const { host, port } = await sandbox.forwardPort(8080);
+const resp = await fetch(`http://${host}:${port}/index.html`);
+```
+
 ### `sandbox.destroy()`
 
 Kill the VM and clean up all resources. Also supports `await using`:
@@ -123,9 +115,10 @@ await using sandbox = await Sandbox.create();
 Host                                      Guest (Firecracker microVM)
 ┌──────────────────────┐                 ┌──────────────────────┐
 │ TypeScript SDK       │                 │ hearth-agent (Zig)   │
-│ Sandbox.create()     │                 │ - exec via fork/sh   │
+│ Sandbox.create()     │  control (1024) │ - exec via fork/sh   │
 │ sandbox.exec()       │───── vsock ────►│ - file I/O           │
-│ sandbox.destroy()    │                 │ - reconnect on       │
+│ sandbox.forwardPort()│  forward (1025) │ - port forwarding    │
+│ sandbox.destroy()    │◄──── vsock ─────│ - reconnect on       │
 │                      │                 │   snapshot restore   │
 │ Firecracker API      │                 │                      │
 │ Snapshot manager     │                 │ Linux kernel 6.1     │
@@ -137,16 +130,18 @@ Host                                      Guest (Firecracker microVM)
 
 ```
 src/                    TypeScript SDK
-  sandbox/sandbox.ts    Sandbox class (create, exec, destroy)
-  agent/client.ts       Host-side vsock agent client
+  sandbox/sandbox.ts    Sandbox class (create, exec, forwardPort, destroy)
+  agent/client.ts       Host-side vsock agent client (control channel)
   vm/api.ts             Firecracker REST API client
   vm/snapshot.ts        Base snapshot creation and management
   vm/binary.ts          Binary/image path resolution
+  cli/setup.ts          `npx hearth setup` — downloads and configures everything
+  cli/download.ts       HTTP download with progress and redirect handling
   errors.ts             Typed error hierarchy
   util.ts               Shared utilities
 
 agent/                  Zig guest agent (runs inside VM)
-  src/main.zig          vsock server, exec, file I/O
+  src/main.zig          vsock control server, exec, file I/O, port forward relay
   build.zig             Cross-compile for x86_64-linux
 
 docs/                   Specs, design docs, references
@@ -154,11 +149,11 @@ docs/                   Specs, design docs, references
 
 ## Roadmap
 
-**v0.1 (current)**: Working `create → exec → destroy` loop with snapshot restore. 7 integration tests passing.
+**v0.1**: Working `create → exec → destroy` loop with snapshot restore.
 
-**v0.2**: `npx hearth setup` CLI, networking (TAP + port forwarding), streaming exec, upload/download.
+**v0.2 (current)**: `npx hearth setup` CLI, vsock port forwarding (no root needed). 14 tests passing.
 
-**v0.3**: Observability (Victoria Logs/Metrics, `sandbox.logs.query()`, `sandbox.observe()`), daemon backend with VM pooling.
+**v0.3**: Observability (Victoria Logs/Metrics, `sandbox.logs.query()`, `sandbox.observe()`), streaming exec, upload/download, daemon backend.
 
 See [docs/exec-plans/](docs/exec-plans/) for detailed execution plans.
 

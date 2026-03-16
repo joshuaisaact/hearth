@@ -70,6 +70,18 @@ export class FirecrackerApi {
     });
   }
 
+  putNetworkInterface(
+    id: string,
+    hostDevName: string,
+    guestMac: string,
+  ): Promise<void> {
+    return this.request("PUT", `/network-interfaces/${id}`, {
+      iface_id: id,
+      host_dev_name: hostDevName,
+      guest_mac: guestMac,
+    });
+  }
+
   putVsock(guestCid: number, udsPath: string): Promise<void> {
     return this.request("PUT", "/vsock", {
       guest_cid: guestCid,

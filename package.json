@@ -11,6 +11,9 @@
       "types": "./dist/index.d.ts"
     }
   },
+  "bin": {
+    "hearth": "dist/cli/hearth.js"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
@@ -32,8 +35,8 @@
     "node": ">=20"
   },
   "devDependencies": {
+    "@types/node": "^25.5.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0",
-    "@types/node": "^22.0.0"
+    "vitest": "^4.1.0"
   }
 }
