@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+*.log
+coverage/
+.vscode/
+.idea/
+agent/.zig-cache/
+agent/zig-out/
