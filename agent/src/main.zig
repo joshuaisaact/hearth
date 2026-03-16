@@ -305,6 +305,135 @@ fn handleReadFile(path: []const u8, resp_buf: []u8) []const u8 {
     , .{file_b64_buf[0..b64_len]}) catch formatError(resp_buf, "response too large");
 }
 
+const FORWARD_PORT: u32 = 1025;
+
+// Port-forward listener: accepts vsock connections from host via CONNECT protocol.
+// Each connection: read a JSON line {"port":N}, dial guest localhost:N, relay bidirectionally.
+// Runs in a forked child so it doesn't block the main control loop.
+fn startForwardListener() void {
+    const fork_rc: isize = @bitCast(linux.fork());
+    if (fork_rc != 0) return; // parent returns immediately
+
+    // Child: listen on vsock port 1025 for forward requests
+    const listen_fd = listenVsock(FORWARD_PORT) catch linux.exit_group(1);
+
+    while (true) {
+        const accept_rc: isize = @bitCast(linux.accept4(listen_fd, null, null, linux.SOCK.CLOEXEC));
+        if (accept_rc < 0) continue;
+        const conn_fd: linux.fd_t = @intCast(accept_rc);
+
+        // Fork again for each connection so we can handle many concurrently
+        const child_rc: isize = @bitCast(linux.fork());
+        if (child_rc < 0) {
+            _ = linux.close(conn_fd);
+            continue;
+        }
+        if (child_rc > 0) {
+            // Parent: close our copy, continue accepting
+            _ = linux.close(conn_fd);
+            // Reap all finished children (non-blocking)
+            var dummy_status: u32 = 0;
+            while (true) {
+                const w: isize = @bitCast(linux.waitpid(-1, &dummy_status, 1));
+                if (w <= 0) break;
+            }
+            continue;
+        }
+
+        // Grandchild: handle this forward connection
+        _ = linux.close(listen_fd);
+        handleForwardConn(conn_fd);
+        _ = linux.close(conn_fd);
+        linux.exit_group(0);
+    }
+}
+
+fn listenVsock(port: u32) !linux.fd_t {
+    const sock_rc: isize = @bitCast(linux.socket(AF_VSOCK, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0));
+    if (sock_rc < 0) return error.SocketFailed;
+    const fd: linux.fd_t = @intCast(sock_rc);
+
+    const addr = SockaddrVm{ .port = port, .cid = 0xFFFFFFFF }; // VMADDR_CID_ANY
+    const bind_rc: isize = @bitCast(linux.bind(fd, @ptrCast(&addr), @sizeOf(SockaddrVm)));
+    if (bind_rc < 0) {
+        _ = linux.close(fd);
+        return error.BindFailed;
+    }
+
+    const listen_rc: isize = @bitCast(linux.listen(fd, 16));
+    if (listen_rc < 0) {
+        _ = linux.close(fd);
+        return error.ListenFailed;
+    }
+
+    return fd;
+}
+
+var forward_req_buf: [1024]u8 = undefined;
+var forward_relay_buf: [64 * 1024]u8 = undefined;
+
+fn handleForwardConn(vsock_fd: linux.fd_t) void {
+    // Read JSON request line: {"port":8080}\n
+    var total: usize = 0;
+    while (total < forward_req_buf.len) {
+        const rc: isize = @bitCast(linux.read(vsock_fd, forward_req_buf[total..].ptr, 1));
+        if (rc <= 0) return;
+        if (forward_req_buf[total] == '\n') break;
+        total += 1;
+    }
+
+    const port = jsonU32(forward_req_buf[0..total], "port");
+    if (port == 0) return;
+
+    // Connect to guest localhost:port
+    const tcp_fd = tcpConnect(port);
+    if (tcp_fd < 0) return;
+    defer _ = linux.close(tcp_fd);
+
+    // Bidirectional relay: vsock ↔ TCP
+    var pfds = [2]linux.pollfd{
+        .{ .fd = vsock_fd, .events = linux.POLL.IN, .revents = 0 },
+        .{ .fd = tcp_fd, .events = linux.POLL.IN, .revents = 0 },
+    };
+
+    while (true) {
+        const poll_rc: isize = @bitCast(linux.poll(@ptrCast(&pfds), 2, 300_000));
+        if (poll_rc <= 0) break;
+
+        if (pfds[0].revents & (linux.POLL.IN | linux.POLL.HUP) != 0) {
+            const n: isize = @bitCast(linux.read(vsock_fd, &forward_relay_buf, forward_relay_buf.len));
+            if (n <= 0) break;
+            writeAll(tcp_fd, forward_relay_buf[0..@intCast(n)]) catch break;
+        }
+
+        if (pfds[1].revents & (linux.POLL.IN | linux.POLL.HUP) != 0) {
+            const n: isize = @bitCast(linux.read(tcp_fd, &forward_relay_buf, forward_relay_buf.len));
+            if (n <= 0) break;
+            writeAll(vsock_fd, forward_relay_buf[0..@intCast(n)]) catch break;
+        }
+    }
+}
+
+fn tcpConnect(port: u32) linux.fd_t {
+    const sock_rc: isize = @bitCast(linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0));
+    if (sock_rc < 0) return -1;
+    const fd: linux.fd_t = @intCast(sock_rc);
+
+    var addr: linux.sockaddr.in = .{
+        .family = linux.AF.INET,
+        .port = @byteSwap(@as(u16, @intCast(port))),
+        .addr = @byteSwap(@as(u32, 0x7f000001)), // 127.0.0.1
+        .zero = .{0} ** 8,
+    };
+
+    const connect_rc: isize = @bitCast(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in)));
+    if (connect_rc < 0) {
+        _ = linux.close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 fn formatError(buf: []u8, msg: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "{{\"ok\":false,\"error\":\"{s}\"}}", .{msg}) catch "{}";
 }
@@ -362,6 +491,10 @@ fn jsonU32(json: []const u8, key: []const u8) u32 {
 }
 
 pub fn main() !void {
+    // Start the port-forward listener in a child process.
+    // It listens on vsock port 1025 for host-initiated CONNECT requests.
+    startForwardListener();
+
     // Outer reconnect loop: after disconnect (e.g. snapshot restore),
     // the agent reconnects to the new host vsock listener.
     while (true) {

@@ -10,6 +10,9 @@ export class AgentClient {
   async waitForConnection(timeoutMs: number = 10000): Promise<void> {
     const udsPath = `${this.vsockUdsPath}_${this.port}`;
 
+    // Remove stale socket file from previous runs
+    try { unlinkSync(udsPath); } catch {}
+
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         server.close();

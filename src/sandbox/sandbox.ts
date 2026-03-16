@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, unlinkSync } from "node:fs";
 import { copyFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
+import net from "node:net";
 import { FirecrackerApi } from "../vm/api.js";
 import { AgentClient } from "../agent/client.js";
 import { getFirecrackerPath, getHearthDir } from "../vm/binary.js";
@@ -31,16 +32,20 @@ export class Sandbox {
   private process: ChildProcess;
   private agent: AgentClient;
   private runDir: string;
+  private vsockPath: string;
+  private portForwardServers: net.Server[] = [];
   private destroyed = false;
 
   private constructor(
     proc: ChildProcess,
     agent: AgentClient,
     runDir: string,
+    vsockPath: string,
   ) {
     this.process = proc;
     this.agent = agent;
     this.runDir = runDir;
+    this.vsockPath = vsockPath;
     activeSandboxes.add(this);
   }
 
@@ -56,18 +61,16 @@ export class Sandbox {
 
     const snapshotDir = getSnapshotDir();
 
-    // Copy snapshot files in parallel (async, non-blocking)
     await Promise.all([
       copyFile(join(snapshotDir, ROOTFS_NAME), join(runDir, ROOTFS_NAME)),
       copyFile(join(snapshotDir, VMSTATE_NAME), join(runDir, VMSTATE_NAME)),
       copyFile(join(snapshotDir, MEMORY_NAME), join(runDir, MEMORY_NAME)),
     ]);
 
-    // Start agent listener BEFORE loading snapshot
-    const agent = new AgentClient(join(runDir, VSOCK_NAME));
+    const vsockPath = join(runDir, VSOCK_NAME);
+    const agent = new AgentClient(vsockPath);
     const agentConnected = agent.waitForConnection(10000);
 
-    // Spawn firecracker with cwd = run dir (relative paths match snapshot)
     const proc = spawn(
       getFirecrackerPath(),
       ["--api-sock", SOCKET_NAME],
@@ -88,7 +91,6 @@ export class Sandbox {
       rmSync(runDir, { recursive: true, force: true });
     };
 
-    // Wait for API socket
     try {
       await waitForFile(join(runDir, SOCKET_NAME), 5000);
     } catch {
@@ -98,7 +100,6 @@ export class Sandbox {
       );
     }
 
-    // Load snapshot and resume
     const api = new FirecrackerApi(join(runDir, SOCKET_NAME));
     try {
       await api.loadSnapshot(VMSTATE_NAME, MEMORY_NAME, true);
@@ -107,7 +108,6 @@ export class Sandbox {
       throw new VmBootError(`Failed to load snapshot: ${errorMessage(err)}`);
     }
 
-    // Wait for agent to reconnect
     try {
       await agentConnected;
     } catch (err) {
@@ -117,7 +117,7 @@ export class Sandbox {
       );
     }
 
-    return new Sandbox(proc, agent, runDir);
+    return new Sandbox(proc, agent, runDir, vsockPath);
   }
 
   async exec(command: string, opts?: ExecOptions): Promise<ExecResult> {
@@ -147,6 +147,82 @@ export class Sandbox {
     return this.agent.readFile(path);
   }
 
+  /**
+   * Forward a guest port to a host port via vsock tunnel.
+   * No TAP device or root required.
+   *
+   * Uses Firecracker's host-initiated CONNECT protocol:
+   * Host connects to vsock UDS → sends "CONNECT 1025\n" → gets "OK\n" →
+   * sends {"port":N}\n → agent dials guest localhost:N → bidirectional relay.
+   */
+  async forwardPort(guestPort: number): Promise<{ host: string; port: number }> {
+    this.ensureAlive();
+
+    const vsockUds = join(this.runDir, VSOCK_NAME);
+
+    return new Promise((resolve, reject) => {
+      const tcpServer = net.createServer((clientConn) => {
+        // For each TCP connection, open a vsock channel to the agent's forward listener
+        const vsock = net.connect({ path: vsockUds });
+
+        vsock.once("connect", () => {
+          // Send CONNECT to Firecracker's vsock device
+          vsock.write("CONNECT 1025\n");
+        });
+
+        let handshakeDone = false;
+        let buf = "";
+
+        vsock.on("data", function onHandshake(chunk: Buffer) {
+          if (handshakeDone) return;
+          buf += chunk.toString();
+
+          const nlIndex = buf.indexOf("\n");
+          if (nlIndex === -1) return;
+
+          // Firecracker responds "OK <local_port>\n" on success
+          if (!buf.startsWith("OK")) {
+            clientConn.destroy();
+            vsock.destroy();
+            return;
+          }
+
+          handshakeDone = true;
+          vsock.removeListener("data", onHandshake);
+
+          // Send port-forward request to the agent
+          vsock.write(`{"port":${guestPort}}\n`);
+
+          // Pipe bidirectionally — forward any data after the handshake line
+          clientConn.pipe(vsock);
+          vsock.pipe(clientConn);
+          const remainder = buf.slice(nlIndex + 1);
+          if (remainder.length > 0) {
+            clientConn.write(remainder);
+          }
+        });
+
+        clientConn.on("error", () => vsock.destroy());
+        vsock.on("error", () => clientConn.destroy());
+        clientConn.on("close", () => vsock.destroy());
+        vsock.on("close", () => clientConn.destroy());
+      });
+
+      tcpServer.listen(0, "127.0.0.1", () => {
+        const addr = tcpServer.address();
+        if (!addr || typeof addr === "string") {
+          tcpServer.close();
+          reject(new Error("Failed to bind port forward listener"));
+          return;
+        }
+        this.portForwardServers.push(tcpServer);
+        resolve({ host: "127.0.0.1", port: addr.port });
+      });
+
+      tcpServer.on("error", reject);
+    });
+  }
+
   async destroy(): Promise<void> {
     if (this.destroyed) return;
     this.destroySync();
@@ -156,6 +232,9 @@ export class Sandbox {
     if (this.destroyed) return;
     this.destroyed = true;
     activeSandboxes.delete(this);
+    for (const s of this.portForwardServers) {
+      try { s.close(); } catch {}
+    }
     try { this.agent.close(); } catch {}
     try { this.process.kill("SIGKILL"); } catch {}
     try { rmSync(this.runDir, { recursive: true, force: true }); } catch {}
