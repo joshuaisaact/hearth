@@ -2,7 +2,6 @@ import { describe, it, expect, afterEach } from "vitest";
 import { existsSync } from "node:fs";
 import { Sandbox } from "./sandbox.js";
 
-// These tests require KVM — skip if not available
 const hasKvm = existsSync("/dev/kvm");
 
 describe.skipIf(!hasKvm)("Sandbox", () => {
@@ -64,6 +63,22 @@ describe.skipIf(!hasKvm)("Sandbox", () => {
     expect(result.stdout).toBe("/tmp\n");
   }, 30000);
 
+  it("should forward a guest port to the host via vsock", async () => {
+    sandbox = await Sandbox.create();
+
+    await sandbox.exec("mkdir -p /tmp/www");
+    await sandbox.writeFile("/tmp/www/index.html", "hello hearth!");
+    await sandbox.exec("busybox httpd -p 8080 -h /tmp/www");
+
+    const { host, port } = await sandbox.forwardPort(8080);
+    expect(host).toBe("127.0.0.1");
+    expect(port).toBeGreaterThan(0);
+
+    const resp = await fetch(`http://${host}:${port}/index.html`);
+    expect(resp.status).toBe(200);
+    expect(await resp.text()).toBe("hello hearth!");
+  }, 30000);
+
   it("should clean up after destroy", async () => {
     sandbox = await Sandbox.create();
     await sandbox.destroy();
@@ -71,6 +86,6 @@ describe.skipIf(!hasKvm)("Sandbox", () => {
     await expect(sandbox.exec("echo test")).rejects.toThrow(
       "Sandbox has been destroyed",
     );
-    sandbox = null; // Prevent double-destroy in afterEach
+    sandbox = null;
   }, 30000);
 });
