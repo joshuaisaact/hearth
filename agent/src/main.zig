@@ -363,6 +363,11 @@ fn listenVsock(port: u32) !linux.fd_t {
     if (sock_rc < 0) return error.SocketFailed;
     const fd: linux.fd_t = @intCast(sock_rc);
 
+    // SO_REUSEADDR: allow rebinding after snapshot restore (old listeners are dead
+    // but the kernel's vsock port table was restored with them still bound)
+    var one: u32 = 1;
+    _ = linux.setsockopt(fd, 1, 2, @ptrCast(&one), @sizeOf(u32)); // SOL_SOCKET=1, SO_REUSEADDR=2
+
     const addr = SockaddrVm{ .port = port, .cid = 0xFFFFFFFF }; // VMADDR_CID_ANY
     const bind_rc: isize = @bitCast(linux.bind(fd, @ptrCast(&addr), @sizeOf(SockaddrVm)));
     if (bind_rc < 0) {
@@ -557,10 +562,6 @@ fn jsonU32(json: []const u8, key: []const u8) u32 {
 }
 
 pub fn main() !void {
-    // Start background listeners in child processes.
-    startListener(FORWARD_PORT, handleForwardConn);   // TCP port forwarding
-    startListener(TRANSFER_PORT, handleTransferConn); // tar-based file transfer
-
     // Outer reconnect loop: after disconnect (e.g. snapshot restore),
     // the agent reconnects to the new host vsock listener.
     while (true) {
@@ -568,9 +569,6 @@ pub fn main() !void {
         _ = linux.write(1, msg.ptr, msg.len);
 
         const sock = connectWithRetry() catch {
-            // If we can't connect at all, sleep and retry forever.
-            // This handles the snapshot restore case where the host
-            // listener may not be ready immediately.
             const ts = linux.timespec{ .sec = 1, .nsec = 0 };
             _ = linux.nanosleep(&ts, null);
             continue;
@@ -578,6 +576,12 @@ pub fn main() !void {
 
         const ready = "hearth-agent: connected to host\n";
         _ = linux.write(1, ready.ptr, ready.len);
+
+        // (Re)start background listeners after each reconnect.
+        // Forked children don't survive snapshot restore, so we
+        // must restart them every time the control channel reconnects.
+        startListener(FORWARD_PORT, handleForwardConn);
+        startListener(TRANSFER_PORT, handleTransferConn);
 
         // Inner command loop
         while (true) {

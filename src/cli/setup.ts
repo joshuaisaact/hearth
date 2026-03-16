@@ -201,8 +201,13 @@ async function setupRootfs() {
       [
         "FROM ubuntu:24.04",
         "RUN apt-get update && apt-get install -y --no-install-recommends \\",
-        "    ca-certificates curl iproute2 busybox \\",
+        "    ca-certificates curl iproute2 busybox git python3 make g++ \\",
         "    && rm -rf /var/lib/apt/lists/*",
+        "RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \\",
+        "    && apt-get install -y --no-install-recommends nodejs \\",
+        "    && rm -rf /var/lib/apt/lists/* \\",
+        "    && npm install -g node-gyp \\",
+        "    && node-gyp install",
         "RUN echo 'root:root' | chpasswd",
         "COPY hearth-agent /usr/local/bin/hearth-agent",
         "RUN chmod +x /usr/local/bin/hearth-agent",
@@ -249,7 +254,7 @@ async function setupRootfs() {
     );
 
     console.log("  rootfs: creating ext4 image...");
-    execSync(`truncate -s 512M "${rootfsPath}"`, { stdio: "pipe" });
+    execSync(`truncate -s 2G "${rootfsPath}"`, { stdio: "pipe" });
     execSync(`mkfs.ext4 -F -q -d "${extractDir}" "${rootfsPath}"`, {
       stdio: "pipe",
     });

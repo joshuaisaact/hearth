@@ -83,7 +83,7 @@ async function createBaseSnapshotIfNeeded(): Promise<void> {
   try {
     // Configure VM — these are independent, run in parallel
     await Promise.all([
-      api.putMachineConfig(1, 256),
+      api.putMachineConfig(2, 512),
       api.putBootSource(
         getKernelPath(),
         "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init",

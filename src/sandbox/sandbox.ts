@@ -117,6 +117,11 @@ export class Sandbox {
       );
     }
 
+    // Ping to ensure the agent's command loop (and background listeners) are ready.
+    // The agent starts listeners after connecting but before entering the command loop,
+    // so by the time the ping response arrives, all listeners are active.
+    await agent.ping();
+
     return new Sandbox(proc, agent, runDir, vsockPath);
   }
 
