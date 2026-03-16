@@ -1,0 +1,297 @@
+#!/usr/bin/env node
+
+import {
+  existsSync,
+  mkdirSync,
+  chmodSync,
+  rmSync,
+  copyFileSync,
+  accessSync,
+  constants,
+  writeFileSync,
+  statfsSync,
+} from "node:fs";
+import { join } from "node:path";
+import { execSync } from "node:child_process";
+import { arch } from "node:os";
+import { download, fetchText } from "./download.js";
+import { getHearthDir } from "../vm/binary.js";
+import { errorMessage } from "../util.js";
+
+const HEARTH_DIR = getHearthDir();
+const BIN_DIR = join(HEARTH_DIR, "bin");
+const BASES_DIR = join(HEARTH_DIR, "bases");
+const FC_VERSION = "v1.15.0";
+
+function fcArch(): string {
+  const a = arch();
+  if (a === "x64") return "x86_64";
+  if (a === "arm64") return "aarch64";
+  throw new Error(`Unsupported architecture: ${a}`);
+}
+
+async function main() {
+  console.log("hearth setup\n");
+
+  checkKvm();
+
+  mkdirSync(BIN_DIR, { recursive: true });
+  mkdirSync(BASES_DIR, { recursive: true });
+
+  // These three are independent — run in parallel
+  await Promise.all([setupFirecracker(), setupKernel(), setupAgent()]);
+  // Rootfs depends on agent binary; snapshot depends on rootfs
+  await setupRootfs();
+  await createBaseSnapshot();
+
+  reportFilesystem();
+
+  console.log("\nSetup complete. You can now use hearth:");
+  console.log('  import { Sandbox } from "hearth";');
+  console.log("  const sandbox = await Sandbox.create();");
+}
+
+function checkKvm() {
+  if (!existsSync("/dev/kvm")) {
+    console.error("ERROR: /dev/kvm not found. Firecracker requires KVM.");
+    console.error("  - Ensure KVM kernel module is loaded: sudo modprobe kvm");
+    console.error("  - On a VM, enable nested virtualization");
+    process.exit(1);
+  }
+  try {
+    accessSync("/dev/kvm", constants.R_OK | constants.W_OK);
+  } catch {
+    console.error("ERROR: No read/write access to /dev/kvm.");
+    console.error("  - Add your user to the kvm group: sudo usermod -aG kvm $USER");
+    console.error("  - Or set ACL: sudo setfacl -m u:$USER:rw /dev/kvm");
+    process.exit(1);
+  }
+  console.log("  /dev/kvm: OK");
+}
+
+async function setupFirecracker() {
+  const fcPath = join(BIN_DIR, "firecracker");
+  if (existsSync(fcPath)) {
+    console.log("  firecracker: already installed");
+    return;
+  }
+
+  const architecture = fcArch();
+  const tarball = `firecracker-${FC_VERSION}-${architecture}.tgz`;
+  const url = `https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/${tarball}`;
+  const tarPath = join(BIN_DIR, "fc.tgz");
+
+  console.log(`  firecracker: downloading ${FC_VERSION} for ${architecture}...`);
+  await download(url, tarPath);
+
+  execSync("tar xzf fc.tgz", { cwd: BIN_DIR, stdio: "pipe" });
+
+  const releaseDir = `release-${FC_VERSION}-${architecture}`;
+  copyFileSync(
+    join(BIN_DIR, releaseDir, `firecracker-${FC_VERSION}-${architecture}`),
+    fcPath,
+  );
+  copyFileSync(
+    join(BIN_DIR, releaseDir, `jailer-${FC_VERSION}-${architecture}`),
+    join(BIN_DIR, "jailer"),
+  );
+  chmodSync(fcPath, 0o755);
+  chmodSync(join(BIN_DIR, "jailer"), 0o755);
+
+  rmSync(join(BIN_DIR, releaseDir), { recursive: true, force: true });
+  rmSync(tarPath, { force: true });
+
+  console.log("  firecracker: installed");
+}
+
+async function setupKernel() {
+  const kernelPath = join(BASES_DIR, "vmlinux");
+  if (existsSync(kernelPath)) {
+    console.log("  kernel: already installed");
+    return;
+  }
+
+  const architecture = fcArch();
+  const ciVersion = FC_VERSION.replace(/\.\d+$/, ""); // v1.15.0 -> v1.15
+
+  console.log("  kernel: finding latest from Firecracker CI...");
+  const listUrl = `http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/${ciVersion}/${architecture}/vmlinux-&list-type=2`;
+  const xml = await fetchText(listUrl);
+
+  const keys = [...xml.matchAll(/<Key>(firecracker-ci\/[^<]+\/vmlinux-[\d.]+)<\/Key>/g)]
+    .map((m) => m[1])
+    .sort();
+
+  if (keys.length === 0) {
+    throw new Error("No kernel found in Firecracker CI S3 bucket");
+  }
+
+  const latestKey = keys[keys.length - 1];
+  const kernelUrl = `https://s3.amazonaws.com/spec.ccfc.min/${latestKey}`;
+
+  console.log(`  kernel: downloading ${latestKey.split("/").pop()}...`);
+  await download(kernelUrl, kernelPath);
+  console.log("  kernel: installed");
+}
+
+async function setupAgent() {
+  const agentPath = join(BIN_DIR, "hearth-agent");
+  if (existsSync(agentPath)) {
+    console.log("  hearth-agent: already built");
+    return;
+  }
+
+  try {
+    execSync("zig version", { stdio: "pipe" });
+  } catch {
+    console.error("ERROR: Zig not found on PATH. The guest agent requires Zig to build.");
+    console.error("  Install Zig: https://ziglang.org/download/");
+    process.exit(1);
+  }
+
+  const agentDir = findAgentDir();
+  console.log("  hearth-agent: building with Zig...");
+  execSync("zig build", { cwd: agentDir, stdio: "pipe" });
+  copyFileSync(join(agentDir, "zig-out", "bin", "hearth-agent"), agentPath);
+  chmodSync(agentPath, 0o755);
+  console.log("  hearth-agent: built");
+}
+
+function findAgentDir(): string {
+  const candidates = [
+    join(import.meta.dirname ?? "", "..", "..", "agent"),
+    join(process.cwd(), "agent"),
+  ];
+  for (const dir of candidates) {
+    if (existsSync(join(dir, "build.zig"))) return dir;
+  }
+  throw new Error("Could not find agent/ directory. Run from the hearth repo root.");
+}
+
+async function setupRootfs() {
+  const rootfsPath = join(BASES_DIR, "ubuntu-24.04.ext4");
+  if (existsSync(rootfsPath)) {
+    console.log("  rootfs: already built");
+    return;
+  }
+
+  const agentBin = join(BIN_DIR, "hearth-agent");
+  if (!existsSync(agentBin)) {
+    throw new Error("hearth-agent not found. Agent must be built before rootfs.");
+  }
+
+  try {
+    execSync("docker info", { stdio: "pipe" });
+  } catch {
+    console.error("ERROR: Docker is required to build the rootfs.");
+    console.error("  Install Docker: https://docs.docker.com/get-docker/");
+    process.exit(1);
+  }
+
+  console.log("  rootfs: building via Docker...");
+
+  const tmpDir = join(HEARTH_DIR, "tmp-rootfs-build");
+  mkdirSync(tmpDir, { recursive: true });
+
+  try {
+    copyFileSync(agentBin, join(tmpDir, "hearth-agent"));
+
+    writeFileSync(
+      join(tmpDir, "Dockerfile"),
+      [
+        "FROM ubuntu:24.04",
+        "RUN apt-get update && apt-get install -y --no-install-recommends \\",
+        "    ca-certificates curl iproute2 busybox \\",
+        "    && rm -rf /var/lib/apt/lists/*",
+        "RUN echo 'root:root' | chpasswd",
+        "COPY hearth-agent /usr/local/bin/hearth-agent",
+        "RUN chmod +x /usr/local/bin/hearth-agent",
+        "",
+      ].join("\n"),
+    );
+
+    execSync("docker build -t hearth-rootfs .", { cwd: tmpDir, stdio: "pipe" });
+
+    console.log("  rootfs: exporting container...");
+    const cid = execSync("docker create hearth-rootfs", { stdio: "pipe" })
+      .toString()
+      .trim();
+    execSync(`docker export ${cid} > rootfs.tar`, {
+      cwd: tmpDir,
+      stdio: "pipe",
+      shell: "/bin/sh",
+    });
+    execSync(`docker rm ${cid}`, { stdio: "pipe" });
+
+    const extractDir = join(tmpDir, "rootfs");
+    mkdirSync(extractDir, { recursive: true });
+    execSync("tar xf rootfs.tar -C rootfs", { cwd: tmpDir, stdio: "pipe" });
+
+    // Minimal init that mounts essential filesystems and starts the agent
+    writeFileSync(
+      join(extractDir, "sbin", "init"),
+      [
+        "#!/bin/sh",
+        "mount -t proc proc /proc",
+        "mount -t sysfs sysfs /sys",
+        "mount -t devtmpfs devtmpfs /dev 2>/dev/null",
+        "mkdir -p /dev/pts /dev/shm",
+        "mount -t devpts devpts /dev/pts",
+        "mount -t tmpfs tmpfs /dev/shm",
+        "mount -t tmpfs tmpfs /tmp",
+        "mount -t tmpfs tmpfs /run",
+        "hostname hearth",
+        "ip link set lo up 2>/dev/null",
+        "exec /usr/local/bin/hearth-agent",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    console.log("  rootfs: creating ext4 image...");
+    execSync(`truncate -s 512M "${rootfsPath}"`, { stdio: "pipe" });
+    execSync(`mkfs.ext4 -F -q -d "${extractDir}" "${rootfsPath}"`, {
+      stdio: "pipe",
+    });
+
+    console.log("  rootfs: built");
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+async function createBaseSnapshot() {
+  const { ensureBaseSnapshot, hasBaseSnapshot } = await import("../vm/snapshot.js");
+  if (hasBaseSnapshot()) {
+    console.log("  snapshot: already created");
+    return;
+  }
+
+  console.log("  snapshot: creating base snapshot (booting VM, ~2s)...");
+  await ensureBaseSnapshot();
+  console.log("  snapshot: created");
+}
+
+function reportFilesystem() {
+  console.log("");
+  try {
+    // statfsSync type field indicates filesystem — btrfs, XFS, or ext4
+    const stats: any = statfsSync(HEARTH_DIR);
+    const fsType: number | undefined = stats.type;
+    if (fsType === 0x9123683e) {
+      console.log("  storage: btrfs — reflink CoW enabled (instant snapshots)");
+    } else if (fsType === 0x58465342) {
+      console.log("  storage: XFS — reflink CoW enabled (instant snapshots)");
+    } else if (fsType === 0xef53) {
+      console.log("  storage: ext4 — no reflink support (snapshots use full copies)");
+      console.log("  tip: place ~/.hearth on btrfs or XFS for instant snapshot clones");
+    }
+  } catch {
+    // statfsSync may not expose type on all Node versions
+  }
+}
+
+main().catch((err) => {
+  console.error(`\nSetup failed: ${errorMessage(err)}`);
+  process.exit(1);
+});
