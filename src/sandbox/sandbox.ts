@@ -147,65 +147,67 @@ export class Sandbox {
     return this.agent.readFile(path);
   }
 
-  /**
-   * Forward a guest port to a host port via vsock tunnel.
-   * No TAP device or root required.
-   *
-   * Uses Firecracker's host-initiated CONNECT protocol:
-   * Host connects to vsock UDS → sends "CONNECT 1025\n" → gets "OK\n" →
-   * sends {"port":N}\n → agent dials guest localhost:N → bidirectional relay.
-   */
+  /** Upload a file or directory from the host into the guest via tar streaming over vsock. */
+  async upload(hostPath: string, guestPath: string): Promise<void> {
+    this.ensureAlive();
+    await this.tarTransfer("upload", guestPath, hostPath);
+  }
+
+  /** Download a file or directory from the guest to the host via tar streaming over vsock. */
+  async download(guestPath: string, hostPath: string): Promise<void> {
+    this.ensureAlive();
+    mkdirSync(hostPath, { recursive: true });
+    await this.tarTransfer("download", guestPath, hostPath);
+  }
+
+  private async tarTransfer(
+    method: "upload" | "download",
+    guestPath: string,
+    hostPath: string,
+  ): Promise<void> {
+    const vsock = await this.vsockConnect(1026);
+
+    // Send the transfer header (properly escaped JSON)
+    vsock.write(JSON.stringify({ method, path: guestPath }) + "\n");
+
+    return new Promise((resolve, reject) => {
+      if (method === "upload") {
+        const tar = spawn("tar", ["c", "-C", hostPath, "."], {
+          stdio: ["ignore", "pipe", "ignore"],
+        });
+        tar.stdout!.pipe(vsock);
+        tar.on("close", () => vsock.end());
+        vsock.on("close", () => resolve());
+        vsock.on("error", reject);
+        tar.on("error", reject);
+      } else {
+        const tar = spawn("tar", ["x", "-C", hostPath], {
+          stdio: ["pipe", "ignore", "ignore"],
+        });
+        vsock.pipe(tar.stdin!);
+        tar.on("close", () => resolve());
+        vsock.on("error", reject);
+        tar.on("error", reject);
+      }
+    });
+  }
+
+  /** Forward a guest port to a host port via vsock tunnel. No root required. */
   async forwardPort(guestPort: number): Promise<{ host: string; port: number }> {
     this.ensureAlive();
 
-    const vsockUds = join(this.runDir, VSOCK_NAME);
-
     return new Promise((resolve, reject) => {
       const tcpServer = net.createServer((clientConn) => {
-        // For each TCP connection, open a vsock channel to the agent's forward listener
-        const vsock = net.connect({ path: vsockUds });
+        this.vsockConnect(1025).then((vsock) => {
+          vsock.write(JSON.stringify({ port: guestPort }) + "\n");
 
-        vsock.once("connect", () => {
-          // Send CONNECT to Firecracker's vsock device
-          vsock.write("CONNECT 1025\n");
-        });
-
-        let handshakeDone = false;
-        let buf = "";
-
-        vsock.on("data", function onHandshake(chunk: Buffer) {
-          if (handshakeDone) return;
-          buf += chunk.toString();
-
-          const nlIndex = buf.indexOf("\n");
-          if (nlIndex === -1) return;
-
-          // Firecracker responds "OK <local_port>\n" on success
-          if (!buf.startsWith("OK")) {
-            clientConn.destroy();
-            vsock.destroy();
-            return;
-          }
-
-          handshakeDone = true;
-          vsock.removeListener("data", onHandshake);
-
-          // Send port-forward request to the agent
-          vsock.write(`{"port":${guestPort}}\n`);
-
-          // Pipe bidirectionally — forward any data after the handshake line
           clientConn.pipe(vsock);
           vsock.pipe(clientConn);
-          const remainder = buf.slice(nlIndex + 1);
-          if (remainder.length > 0) {
-            clientConn.write(remainder);
-          }
-        });
-
-        clientConn.on("error", () => vsock.destroy());
-        vsock.on("error", () => clientConn.destroy());
-        clientConn.on("close", () => vsock.destroy());
-        vsock.on("close", () => clientConn.destroy());
+          clientConn.on("error", () => vsock.destroy());
+          vsock.on("error", () => clientConn.destroy());
+          clientConn.on("close", () => vsock.destroy());
+          vsock.on("close", () => clientConn.destroy());
+        }).catch(() => clientConn.destroy());
       });
 
       tcpServer.listen(0, "127.0.0.1", () => {
@@ -242,6 +244,38 @@ export class Sandbox {
 
   async [Symbol.asyncDispose](): Promise<void> {
     await this.destroy();
+  }
+
+  /** Connect to a guest vsock port via Firecracker's CONNECT protocol. */
+  private vsockConnect(guestPort: number): Promise<net.Socket> {
+    const vsockUds = join(this.runDir, VSOCK_NAME);
+
+    return new Promise((resolve, reject) => {
+      const vsock = net.connect({ path: vsockUds });
+
+      vsock.once("connect", () => {
+        vsock.write(`CONNECT ${guestPort}\n`);
+      });
+
+      let buf = "";
+
+      vsock.on("data", function onHandshake(chunk: Buffer) {
+        buf += chunk.toString();
+        if (!buf.includes("\n")) return;
+
+        vsock.removeListener("data", onHandshake);
+
+        if (!buf.startsWith("OK")) {
+          vsock.destroy();
+          reject(new Error(`vsock CONNECT ${guestPort} failed: ${buf.trim()}`));
+          return;
+        }
+
+        resolve(vsock);
+      });
+
+      vsock.on("error", reject);
+    });
   }
 
   private ensureAlive(): void {

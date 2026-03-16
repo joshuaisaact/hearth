@@ -1,5 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { Sandbox } from "./sandbox.js";
 
 const hasKvm = existsSync("/dev/kvm");
@@ -77,6 +79,44 @@ describe.skipIf(!hasKvm)("Sandbox", () => {
     const resp = await fetch(`http://${host}:${port}/index.html`);
     expect(resp.status).toBe(200);
     expect(await resp.text()).toBe("hello hearth!");
+  }, 30000);
+
+  it("should upload a directory to the guest", async () => {
+    sandbox = await Sandbox.create();
+
+    const srcDir = join(tmpdir(), "hearth-test-upload");
+    rmSync(srcDir, { recursive: true, force: true });
+    mkdirSync(join(srcDir, "sub"), { recursive: true });
+    writeFileSync(join(srcDir, "hello.txt"), "upload works");
+    writeFileSync(join(srcDir, "sub", "nested.txt"), "nested file");
+
+    await sandbox.upload(srcDir, "/workspace");
+
+    const hello = await sandbox.exec("cat /workspace/hello.txt");
+    expect(hello.stdout).toBe("upload works");
+
+    const nested = await sandbox.exec("cat /workspace/sub/nested.txt");
+    expect(nested.stdout).toBe("nested file");
+
+    rmSync(srcDir, { recursive: true, force: true });
+  }, 30000);
+
+  it("should download a directory from the guest", async () => {
+    sandbox = await Sandbox.create();
+
+    await sandbox.exec("mkdir -p /tmp/dltest/sub");
+    await sandbox.writeFile("/tmp/dltest/file.txt", "download works");
+    await sandbox.exec("echo nested > /tmp/dltest/sub/nested.txt");
+
+    const destDir = join(tmpdir(), "hearth-test-download");
+    rmSync(destDir, { recursive: true, force: true });
+
+    await sandbox.download("/tmp/dltest", destDir);
+
+    expect(readFileSync(join(destDir, "file.txt"), "utf-8")).toBe("download works");
+    expect(readFileSync(join(destDir, "sub", "nested.txt"), "utf-8")).toBe("nested\n");
+
+    rmSync(destDir, { recursive: true, force: true });
   }, 30000);
 
   it("should clean up after destroy", async () => {

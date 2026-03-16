@@ -260,10 +260,7 @@ fn handleWriteFile(path: []const u8, data_b64: []const u8, mode: u32, resp_buf: 
     };
 
     var path_buf: [512]u8 = undefined;
-    if (path.len >= path_buf.len) return formatError(resp_buf, "path too long");
-    @memcpy(path_buf[0..path.len], path);
-    path_buf[path.len] = 0;
-    const path_z: [*:0]const u8 = @ptrCast(path_buf[0..path.len :0]);
+    const path_z = toPathZ(path, &path_buf) orelse return formatError(resp_buf, "path too long");
 
     const open_rc: isize = @bitCast(linux.open(path_z, .{
         .ACCMODE = .WRONLY,
@@ -284,10 +281,7 @@ fn handleWriteFile(path: []const u8, data_b64: []const u8, mode: u32, resp_buf: 
 
 fn handleReadFile(path: []const u8, resp_buf: []u8) []const u8 {
     var path_buf: [512]u8 = undefined;
-    if (path.len >= path_buf.len) return formatError(resp_buf, "path too long");
-    @memcpy(path_buf[0..path.len], path);
-    path_buf[path.len] = 0;
-    const path_z: [*:0]const u8 = @ptrCast(path_buf[0..path.len :0]);
+    const path_z = toPathZ(path, &path_buf) orelse return formatError(resp_buf, "path too long");
 
     const open_rc: isize = @bitCast(linux.open(path_z, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0));
     if (open_rc < 0) return formatError(resp_buf, "open failed");
@@ -306,43 +300,59 @@ fn handleReadFile(path: []const u8, resp_buf: []u8) []const u8 {
 }
 
 const FORWARD_PORT: u32 = 1025;
+const TRANSFER_PORT: u32 = 1026;
 
-// Port-forward listener: accepts vsock connections from host via CONNECT protocol.
-// Each connection: read a JSON line {"port":N}, dial guest localhost:N, relay bidirectionally.
-// Runs in a forked child so it doesn't block the main control loop.
-fn startForwardListener() void {
+// Shared helpers for vsock listeners
+
+fn toPathZ(path: []const u8, buf: *[512]u8) ?[*:0]const u8 {
+    if (path.len >= buf.len) return null;
+    @memcpy(buf[0..path.len], path);
+    buf[path.len] = 0;
+    return @ptrCast(buf[0..path.len :0]);
+}
+
+var line_buf: [1024]u8 = undefined;
+
+fn readLine(fd: linux.fd_t, buf: []u8) ?[]const u8 {
+    var total: usize = 0;
+    while (total < buf.len) {
+        const rc: isize = @bitCast(linux.read(fd, buf[total..].ptr, 1));
+        if (rc <= 0) return null;
+        if (buf[total] == '\n') return buf[0..total];
+        total += 1;
+    }
+    return null;
+}
+
+/// Fork a child process that listens on a vsock port and dispatches connections.
+fn startListener(port: u32, handler: *const fn (linux.fd_t) void) void {
     const fork_rc: isize = @bitCast(linux.fork());
-    if (fork_rc != 0) return; // parent returns immediately
+    if (fork_rc != 0) return;
 
-    // Child: listen on vsock port 1025 for forward requests
-    const listen_fd = listenVsock(FORWARD_PORT) catch linux.exit_group(1);
+    const listen_fd = listenVsock(port) catch linux.exit_group(1);
 
     while (true) {
         const accept_rc: isize = @bitCast(linux.accept4(listen_fd, null, null, linux.SOCK.CLOEXEC));
         if (accept_rc < 0) continue;
         const conn_fd: linux.fd_t = @intCast(accept_rc);
 
-        // Fork again for each connection so we can handle many concurrently
         const child_rc: isize = @bitCast(linux.fork());
         if (child_rc < 0) {
             _ = linux.close(conn_fd);
             continue;
         }
         if (child_rc > 0) {
-            // Parent: close our copy, continue accepting
             _ = linux.close(conn_fd);
-            // Reap all finished children (non-blocking)
-            var dummy_status: u32 = 0;
+            var dummy: u32 = 0;
             while (true) {
-                const w: isize = @bitCast(linux.waitpid(-1, &dummy_status, 1));
+                const w: isize = @bitCast(linux.waitpid(-1, &dummy, 1));
                 if (w <= 0) break;
             }
             continue;
         }
 
-        // Grandchild: handle this forward connection
         _ = linux.close(listen_fd);
-        handleForwardConn(conn_fd);
+        handler(conn_fd);
         _ = linux.close(conn_fd);
         linux.exit_group(0);
     }
@@ -369,20 +379,11 @@ fn listenVsock(port: u32) !linux.fd_t {
     return fd;
 }
 
-var forward_req_buf: [1024]u8 = undefined;
 var forward_relay_buf: [64 * 1024]u8 = undefined;
 
 fn handleForwardConn(vsock_fd: linux.fd_t) void {
-    // Read JSON request line: {"port":8080}\n
-    var total: usize = 0;
-    while (total < forward_req_buf.len) {
-        const rc: isize = @bitCast(linux.read(vsock_fd, forward_req_buf[total..].ptr, 1));
-        if (rc <= 0) return;
-        if (forward_req_buf[total] == '\n') break;
-        total += 1;
-    }
-
-    const port = jsonU32(forward_req_buf[0..total], "port");
+    const header = readLine(vsock_fd, &line_buf) orelse return;
+    const port = jsonU32(header, "port");
     if (port == 0) return;
 
     // Connect to guest localhost:port
@@ -432,6 +433,71 @@ fn tcpConnect(port: u32) linux.fd_t {
         return -1;
     }
     return fd;
+}
+
+fn handleTransferConn(vsock_fd: linux.fd_t) void {
+    const header = readLine(vsock_fd, &line_buf) orelse return;
+    const method = jsonStr(header, "method") orelse return;
+    const path = jsonStr(header, "path") orelse return;
+
+    var path_buf: [512]u8 = undefined;
+    const path_z = toPathZ(path, &path_buf) orelse return;
+
+    if (std.mem.eql(u8, method, "upload")) {
+        mkdirp(path_z);
+        execWithFdRedirect("/bin/busybox", &.{ "tar", "x", "-C", path_z }, vsock_fd, 0);
+    } else if (std.mem.eql(u8, method, "download")) {
+        execWithFdRedirect("/bin/busybox", &.{ "tar", "c", "-C", path_z, "." }, vsock_fd, 1);
+    }
+}
+
+/// Create a directory and parents via mkdir syscall (no fork/exec).
+fn mkdirp(path_z: [*:0]const u8) void {
+    // Try creating the leaf directory first
+    const rc: isize = @bitCast(linux.mkdir(path_z, 0o755));
+    if (rc >= 0 or rc == -@as(isize, @intCast(@intFromEnum(linux.E.EXIST)))) return;
+
+    // Walk the path creating each component
+    const path = std.mem.sliceTo(path_z, 0);
+    var i: usize = 1;
+    while (i < path.len) : (i += 1) {
+        if (path[i] == '/') {
+            var component: [512]u8 = undefined;
+            @memcpy(component[0..i], path[0..i]);
+            component[i] = 0;
+            _ = linux.mkdir(@ptrCast(component[0..i :0]), 0o755);
+        }
+    }
+    _ = linux.mkdir(path_z, 0o755);
+}
+
+/// Fork+exec a command with one fd redirected (stdin or stdout).
+fn execWithFdRedirect(
+    bin: [*:0]const u8,
+    args: []const [*:0]const u8,
+    fd: linux.fd_t,
+    target_fd: linux.fd_t, // 0 for stdin, 1 for stdout
+) void {
+    // Build argv with null terminator
+    var argv: [8:null]?[*:0]const u8 = .{null} ** 8;
+    argv[0] = bin;
+    for (args, 0..) |arg, j| {
+        if (j + 1 >= argv.len - 1) break;
+        argv[j + 1] = arg;
+    }
+
+    const fork_rc: isize = @bitCast(linux.fork());
+    if (fork_rc < 0) return;
+
+    if (fork_rc == 0) {
+        _ = linux.dup2(fd, target_fd);
+        _ = linux.close(fd);
+        _ = linux.execve(bin, @ptrCast(&argv), @ptrCast(&[_:null]?[*:0]const u8{}));
+        linux.exit_group(127);
+    }
+
+    var status: u32 = 0;
+    _ = linux.waitpid(@intCast(fork_rc), &status, 0);
 }
 
 fn formatError(buf: []u8, msg: []const u8) []const u8 {
@@ -491,9 +557,9 @@ fn jsonU32(json: []const u8, key: []const u8) u32 {
 }
 
 pub fn main() !void {
-    // Start the port-forward listener in a child process.
-    // It listens on vsock port 1025 for host-initiated CONNECT requests.
-    startForwardListener();
+    // Start background listeners in child processes.
+    startListener(FORWARD_PORT, handleForwardConn);   // TCP port forwarding
+    startListener(TRANSFER_PORT, handleTransferConn); // tar-based file transfer
 
     // Outer reconnect loop: after disconnect (e.g. snapshot restore),
     // the agent reconnects to the new host vsock listener.
