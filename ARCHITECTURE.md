@@ -46,18 +46,15 @@ Networking stack:
 - Optional network isolation (no outbound)
 
 ### `agent/` (Zig — separate from TypeScript SDK)
-Guest agent binary that runs inside the VM. Written in Zig, zero-allocation, ported from flint's agent:
-- Communicates over virtio-vsock (AF_VSOCK, port 1024)
-- Executes commands via fork + execve("/bin/sh", "-c", cmd)
-- File I/O with base64 encoding over JSON
-- Health checks
-- Static buffers, single-threaded, ~500KB binary
+Guest agent binary that runs inside the VM. Written in Zig, zero-allocation, ported from flint's agent. Three vsock listeners:
+- **Port 1024** (control): exec, writeFile, readFile, ping. Length-prefixed JSON protocol. Single-threaded, reconnects on snapshot restore.
+- **Port 1025** (forward): TCP port forwarding. Host initiates via Firecracker CONNECT protocol. Agent dials guest localhost, relays bidirectionally via poll(). Fork-per-connection.
+- **Port 1026** (transfer): Tar streaming upload/download. Host initiates via CONNECT. Agent fork+exec's busybox tar with vsock fd redirected to stdin/stdout.
 
 ### `src/agent/` (TypeScript — host-side client)
-Host-side client that talks to the guest agent over vsock:
-- Sends length-prefixed JSON requests
-- Parses responses and streams
-- Reconnect logic for snapshot restore
+Host-side client that talks to the guest agent:
+- Control channel: length-prefixed JSON requests over vsock UDS (guest-initiated connection)
+- Port forwarding + transfers: Firecracker CONNECT protocol (host-initiated via `vsockConnect` helper)
 
 ### `src/backend/`
 Backend interface that abstracts how VMs are managed:

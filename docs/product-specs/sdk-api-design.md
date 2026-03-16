@@ -1,6 +1,6 @@
 # Product Spec: SDK API Design
 
-**Status**: Draft
+**Status**: Partial (core API implemented, spawn/snapshots/observability planned)
 **Last updated**: 2026-03-16
 
 ## Overview

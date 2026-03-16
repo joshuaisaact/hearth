@@ -90,6 +90,22 @@ Read a file from the sandbox.
 const content = await sandbox.readFile("/etc/hostname");
 ```
 
+### `sandbox.upload(hostPath, guestPath)`
+
+Recursively copy a directory from the host into the guest. Uses tar streaming over vsock — no base64, no memory buffering.
+
+```typescript
+await sandbox.upload("./my-project", "/workspace");
+```
+
+### `sandbox.download(guestPath, hostPath)`
+
+Recursively copy a directory from the guest to the host.
+
+```typescript
+await sandbox.download("/workspace/dist", "./output");
+```
+
 ### `sandbox.forwardPort(guestPort)`
 
 Forward a guest TCP port to a random host port via vsock tunnel. No root or TAP devices required.
@@ -117,9 +133,10 @@ Host                                      Guest (Firecracker microVM)
 │ TypeScript SDK       │                 │ hearth-agent (Zig)   │
 │ Sandbox.create()     │  control (1024) │ - exec via fork/sh   │
 │ sandbox.exec()       │───── vsock ────►│ - file I/O           │
-│ sandbox.forwardPort()│  forward (1025) │ - port forwarding    │
-│ sandbox.destroy()    │◄──── vsock ─────│ - reconnect on       │
-│                      │                 │   snapshot restore   │
+│ sandbox.upload()     │  forward (1025) │ - port forwarding    │
+│ sandbox.download()   │  transfer(1026) │ - tar streaming      │
+│ sandbox.forwardPort()│◄──── vsock ─────│ - reconnect on       │
+│ sandbox.destroy()    │                 │   snapshot restore   │
 │ Firecracker API      │                 │                      │
 │ Snapshot manager     │                 │ Linux kernel 6.1     │
 │ Process lifecycle    │                 │ Ubuntu 24.04 rootfs  │
@@ -151,9 +168,9 @@ docs/                   Specs, design docs, references
 
 **v0.1**: Working `create → exec → destroy` loop with snapshot restore.
 
-**v0.2 (current)**: `npx hearth setup` CLI, vsock port forwarding (no root needed). 14 tests passing.
+**v0.2 (current)**: `npx hearth setup` CLI, vsock port forwarding, tar-based upload/download. 16 tests passing.
 
-**v0.3**: Observability (Victoria Logs/Metrics, `sandbox.logs.query()`, `sandbox.observe()`), streaming exec, upload/download, daemon backend.
+**v0.3**: Observability (Victoria Logs/Metrics, `sandbox.logs.query()`, `sandbox.observe()`), streaming exec, daemon backend.
 
 See [docs/exec-plans/](docs/exec-plans/) for detailed execution plans.
 
