@@ -1,3 +1,8 @@
+export interface SnapshotInfo {
+  id: string;
+  createdAt: string;
+}
+
 export interface ExecResult {
   stdout: string;
   stderr: string;

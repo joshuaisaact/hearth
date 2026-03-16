@@ -119,6 +119,39 @@ describe.skipIf(!hasKvm)("Sandbox", () => {
     rmSync(destDir, { recursive: true, force: true });
   }, 30000);
 
+  it("should snapshot and restore a configured sandbox", async () => {
+    // Create and configure
+    sandbox = await Sandbox.create();
+    await sandbox.writeFile("/tmp/state.txt", "configured");
+
+    // Snapshot — this destroys the sandbox
+    const snapName = `test-snap-${Date.now()}`;
+    await sandbox.snapshot(snapName);
+    sandbox = null; // Already destroyed by snapshot()
+
+    try {
+      // Restore from snapshot
+      sandbox = await Sandbox.fromSnapshot(snapName);
+      const result = await sandbox.exec("cat /tmp/state.txt");
+      expect(result.stdout).toBe("configured");
+
+      // Verify it's listed
+      const list = Sandbox.listSnapshots();
+      expect(list.some((s) => s.id === snapName)).toBe(true);
+    } finally {
+      Sandbox.deleteSnapshot(snapName);
+    }
+  }, 60000);
+
+  it("should reject invalid snapshot names", async () => {
+    sandbox = await Sandbox.create();
+    await expect(sandbox.snapshot("bad name!")).rejects.toThrow("alphanumeric");
+  }, 30000);
+
+  it("should throw on missing snapshot", async () => {
+    await expect(Sandbox.fromSnapshot("nonexistent")).rejects.toThrow();
+  }, 5000);
+
   it("should clean up after destroy", async () => {
     sandbox = await Sandbox.create();
     await sandbox.destroy();

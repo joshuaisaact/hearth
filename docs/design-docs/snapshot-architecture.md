@@ -161,8 +161,86 @@ This requires root (or dm permissions) and explicit opt-in via config:
 
 Not planned for v0.1. Add when we have real users hitting the scaling wall on ext4.
 
+## User-Facing Snapshot API (v0.3)
+
+### Motivation
+
+The base snapshot provides a clean Ubuntu + Node.js environment. But real agent workflows need project-specific state: installed npm dependencies, compiled native addons, pre-configured databases. Without user snapshots, this setup repeats on every sandbox — 48 seconds for a native rebuild, or requiring Docker to pre-build matching node_modules.
+
+User-facing snapshots solve this: set up once, snapshot, restore instantly forever.
+
+### API
+
+```typescript
+// 1. Create a sandbox and set it up
+const setup = await Sandbox.create();
+await setup.upload("./my-project", "/workspace");
+await setup.exec("cd /workspace && npm install", { timeout: 120000 });
+
+// 2. Snapshot the configured state
+const snapId = await setup.snapshot("my-project-ready");
+await setup.destroy();
+
+// 3. Restore from snapshot — ~130ms, deps pre-installed
+const sandbox = await Sandbox.fromSnapshot(snapId);
+await sandbox.exec("cd /workspace && npm test");
+await sandbox.destroy();
+
+// 4. List available snapshots
+const snapshots = await Sandbox.listSnapshots();
+// [{ id: "my-project-ready", createdAt: "2026-03-16T..." }, ...]
+
+// 5. Delete a snapshot
+await Sandbox.deleteSnapshot("my-project-ready");
+```
+
+### Implementation
+
+Snapshot capture reuses the same Firecracker pause + snapshot mechanism used for the base snapshot:
+
+1. `sandbox.snapshot(name)`:
+   - Pause VM via Firecracker API
+   - Create Firecracker snapshot (vmstate + memory) using relative paths
+   - Copy snapshot artifacts to `~/.hearth/snapshots/{name}/`
+   - Store metadata (name, creation time, parent snapshot)
+   - Kill the paused VM (snapshot is the artifact, not the running VM)
+
+2. `Sandbox.fromSnapshot(name)`:
+   - Same as current `createFromSnapshot()` but reads from `~/.hearth/snapshots/{name}/` instead of `~/.hearth/snapshots/base/`
+
+3. `Sandbox.listSnapshots()`:
+   - Scan `~/.hearth/snapshots/` directories, read metadata
+
+4. `Sandbox.deleteSnapshot(name)`:
+   - Delete `~/.hearth/snapshots/{name}/` directory
+   - Prevent deleting "base" snapshot
+
+### Store layout
+
+```
+~/.hearth/snapshots/
+├── base/                    (created by npx hearth setup)
+│   ├── vmstate.snap
+│   ├── memory.snap
+│   └── rootfs.ext4
+├── my-project-ready/        (user-created)
+│   ├── metadata.json
+│   ├── vmstate.snap
+│   ├── memory.snap
+│   └── rootfs.ext4
+└── another-template/
+    ├── metadata.json
+    ├── vmstate.snap
+    ├── memory.snap
+    └── rootfs.ext4
+```
+
+### Key constraint
+
+After `snapshot()`, the sandbox is destroyed. Firecracker snapshots pause the VM — you can't resume and continue using it. This matches the mental model: a snapshot is a checkpoint you create, then you restore from it later. It's not a "save and continue" — it's "save and done."
+
 ## Open Questions
 
-1. **Memory snapshot size**: A 256MB VM = 256MB memory snapshot. For a pool of 10 VMs, that's 2.5GB just in snapshots. Diff snapshots help but add restore-time overhead. What's the right tradeoff?
-2. **Snapshot versioning**: Should snapshots be content-addressed (like git objects)? This would enable deduplication.
-3. **Snapshot sharing**: Can users publish/pull snapshot templates? Like Docker Hub but for VM snapshots.
+1. **Memory snapshot size**: 512MB VM = 512MB memory snapshot per user snapshot. Disk usage adds up. Consider diff snapshots in the future.
+2. **Snapshot naming**: Allow arbitrary strings? Restrict to alphanumeric + hyphens? Need validation.
+3. **Snapshot sharing**: Can users publish/pull templates? Deferred — local-only for now.

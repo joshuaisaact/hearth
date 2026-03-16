@@ -116,6 +116,25 @@ const { host, port } = await sandbox.forwardPort(8080);
 const resp = await fetch(`http://${host}:${port}/index.html`);
 ```
 
+### `sandbox.snapshot(name)`
+
+Capture the current sandbox state as a named snapshot. The sandbox is destroyed after snapshotting. Restore from it later with `Sandbox.fromSnapshot()`.
+
+```typescript
+const setup = await Sandbox.create();
+await setup.upload("./my-project", "/workspace");
+await setup.exec("cd /workspace && npm install", { timeout: 120000 });
+await setup.snapshot("my-project-ready"); // sandbox destroyed
+
+// Later — instant restore with deps pre-installed
+const sandbox = await Sandbox.fromSnapshot("my-project-ready"); // ~130ms
+await sandbox.exec("cd /workspace && npm test");
+
+// Manage snapshots
+Sandbox.listSnapshots();              // [{ id: "my-project-ready", createdAt: "..." }]
+Sandbox.deleteSnapshot("my-project-ready");
+```
+
 ### `sandbox.destroy()`
 
 Kill the VM and clean up all resources. Also supports `await using`:
@@ -168,7 +187,7 @@ docs/                   Specs, design docs, references
 
 **v0.1**: Working `create → exec → destroy` loop with snapshot restore.
 
-**v0.2 (current)**: `npx hearth setup` CLI, vsock port forwarding, tar-based upload/download. 16 tests passing.
+**v0.2 (current)**: `npx hearth setup` CLI, vsock port forwarding, tar-based upload/download, user-facing snapshots. 19 tests passing.
 
 **v0.3**: Observability (Victoria Logs/Metrics, `sandbox.logs.query()`, `sandbox.observe()`), streaming exec, daemon backend.
 

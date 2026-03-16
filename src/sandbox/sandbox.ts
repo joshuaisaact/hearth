@@ -1,6 +1,9 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync, rmSync, unlinkSync } from "node:fs";
-import { copyFile } from "node:fs/promises";
+import {
+  mkdirSync, rmSync, unlinkSync, existsSync, constants,
+  readdirSync, readFileSync, writeFileSync,
+} from "node:fs";
+import { copyFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
@@ -18,7 +21,11 @@ import {
 } from "../vm/snapshot.js";
 import { VmBootError } from "../errors.js";
 import { waitForFile, errorMessage } from "../util.js";
-import type { ExecResult, ExecOptions } from "./types.js";
+import type { SnapshotInfo, ExecResult, ExecOptions } from "./types.js";
+
+function userSnapshotDir(name: string): string {
+  return join(getHearthDir(), "snapshots", name);
+}
 
 const activeSandboxes = new Set<Sandbox>();
 
@@ -30,6 +37,7 @@ process.on("exit", () => {
 
 export class Sandbox {
   private process: ChildProcess;
+  private api: FirecrackerApi;
   private agent: AgentClient;
   private runDir: string;
   private vsockPath: string;
@@ -38,33 +46,66 @@ export class Sandbox {
 
   private constructor(
     proc: ChildProcess,
+    api: FirecrackerApi,
     agent: AgentClient,
     runDir: string,
     vsockPath: string,
   ) {
     this.process = proc;
+    this.api = api;
     this.agent = agent;
     this.runDir = runDir;
     this.vsockPath = vsockPath;
     activeSandboxes.add(this);
   }
 
+  /** Create a sandbox from the base snapshot. */
   static async create(): Promise<Sandbox> {
     await ensureBaseSnapshot();
-    return Sandbox.createFromSnapshot();
+    return Sandbox.restoreFromDir(getSnapshotDir());
   }
 
-  private static async createFromSnapshot(): Promise<Sandbox> {
+  /** Create a sandbox from a named user snapshot. */
+  static async fromSnapshot(name: string): Promise<Sandbox> {
+    return Sandbox.restoreFromDir(userSnapshotDir(name));
+  }
+
+  /** List all available user snapshots (excludes the internal "base" snapshot). */
+  static listSnapshots(): SnapshotInfo[] {
+    const snapshotsDir = join(getHearthDir(), "snapshots");
+    if (!existsSync(snapshotsDir)) return [];
+
+    return readdirSync(snapshotsDir)
+      .filter((name) => {
+        if (name === "base") return false;
+        return existsSync(join(snapshotsDir, name, VMSTATE_NAME));
+      })
+      .map((name) => {
+        let createdAt = "";
+        try {
+          createdAt = JSON.parse(readFileSync(join(snapshotsDir, name, "metadata.json"), "utf-8")).createdAt;
+        } catch {}
+        return { id: name, createdAt };
+      });
+  }
+
+  /** Delete a named snapshot. */
+  static deleteSnapshot(name: string): void {
+    if (name === "base") throw new Error("Cannot delete the base snapshot");
+    rmSync(userSnapshotDir(name), { recursive: true, force: true });
+  }
+
+  /** Restore a sandbox from a snapshot directory. */
+  private static async restoreFromDir(snapshotDir: string): Promise<Sandbox> {
     const id = randomBytes(8).toString("hex");
     const runDir = join(getHearthDir(), "run", id);
     mkdirSync(runDir, { recursive: true });
 
-    const snapshotDir = getSnapshotDir();
-
+    const clone = constants.COPYFILE_FICLONE;
     await Promise.all([
-      copyFile(join(snapshotDir, ROOTFS_NAME), join(runDir, ROOTFS_NAME)),
-      copyFile(join(snapshotDir, VMSTATE_NAME), join(runDir, VMSTATE_NAME)),
-      copyFile(join(snapshotDir, MEMORY_NAME), join(runDir, MEMORY_NAME)),
+      copyFile(join(snapshotDir, ROOTFS_NAME), join(runDir, ROOTFS_NAME), clone),
+      copyFile(join(snapshotDir, VMSTATE_NAME), join(runDir, VMSTATE_NAME), clone),
+      copyFile(join(snapshotDir, MEMORY_NAME), join(runDir, MEMORY_NAME), clone),
     ]);
 
     const vsockPath = join(runDir, VSOCK_NAME);
@@ -117,12 +158,60 @@ export class Sandbox {
       );
     }
 
-    // Ping to ensure the agent's command loop (and background listeners) are ready.
-    // The agent starts listeners after connecting but before entering the command loop,
-    // so by the time the ping response arrives, all listeners are active.
     await agent.ping();
 
-    return new Sandbox(proc, agent, runDir, vsockPath);
+    return new Sandbox(proc, api, agent, runDir, vsockPath);
+  }
+
+  /**
+   * Capture the current sandbox state as a named snapshot.
+   * The sandbox is destroyed after snapshotting (Firecracker pauses the VM).
+   * Returns the snapshot name.
+   */
+  async snapshot(name: string): Promise<string> {
+    this.ensureAlive();
+
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+      throw new Error("Snapshot name must be alphanumeric, hyphens, or underscores");
+    }
+
+    const snapDir = userSnapshotDir(name);
+    if (existsSync(snapDir)) {
+      throw new Error(`Snapshot "${name}" already exists`);
+    }
+
+    // Pause first — if this fails, the sandbox is still usable
+    await this.api.pause();
+
+    // Close agent and port forwards after pause succeeded
+    for (const s of this.portForwardServers) {
+      try { s.close(); } catch {}
+    }
+    this.agent.close();
+
+    mkdirSync(snapDir, { recursive: true });
+
+    try {
+      await this.api.createSnapshot(VMSTATE_NAME, MEMORY_NAME);
+
+      // Rename (move) files from runDir to snapDir — O(1) on same filesystem
+      await Promise.all([
+        rename(join(this.runDir, ROOTFS_NAME), join(snapDir, ROOTFS_NAME)),
+        rename(join(this.runDir, VMSTATE_NAME), join(snapDir, VMSTATE_NAME)),
+        rename(join(this.runDir, MEMORY_NAME), join(snapDir, MEMORY_NAME)),
+      ]);
+
+      writeFileSync(
+        join(snapDir, "metadata.json"),
+        JSON.stringify({ name, createdAt: new Date().toISOString() }),
+      );
+    } catch (err) {
+      rmSync(snapDir, { recursive: true, force: true });
+      throw new Error(`Failed to create snapshot: ${errorMessage(err)}`);
+    }
+
+    this.destroySync();
+    return name;
   }
 
   async exec(command: string, opts?: ExecOptions): Promise<ExecResult> {
@@ -152,13 +241,11 @@ export class Sandbox {
     return this.agent.readFile(path);
   }
 
-  /** Upload a file or directory from the host into the guest via tar streaming over vsock. */
   async upload(hostPath: string, guestPath: string): Promise<void> {
     this.ensureAlive();
     await this.tarTransfer("upload", guestPath, hostPath);
   }
 
-  /** Download a file or directory from the guest to the host via tar streaming over vsock. */
   async download(guestPath: string, hostPath: string): Promise<void> {
     this.ensureAlive();
     mkdirSync(hostPath, { recursive: true });
@@ -172,7 +259,6 @@ export class Sandbox {
   ): Promise<void> {
     const vsock = await this.vsockConnect(1026);
 
-    // Send the transfer header (properly escaped JSON)
     vsock.write(JSON.stringify({ method, path: guestPath }) + "\n");
 
     return new Promise((resolve, reject) => {
@@ -197,7 +283,6 @@ export class Sandbox {
     });
   }
 
-  /** Forward a guest port to a host port via vsock tunnel. No root required. */
   async forwardPort(guestPort: number): Promise<{ host: string; port: number }> {
     this.ensureAlive();
 
@@ -251,7 +336,6 @@ export class Sandbox {
     await this.destroy();
   }
 
-  /** Connect to a guest vsock port via Firecracker's CONNECT protocol. */
   private vsockConnect(guestPort: number): Promise<net.Socket> {
     const vsockUds = join(this.runDir, VSOCK_NAME);
 
