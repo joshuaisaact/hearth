@@ -21,7 +21,8 @@ import {
 } from "../vm/snapshot.js";
 import { VmBootError } from "../errors.js";
 import { waitForFile, errorMessage } from "../util.js";
-import type { SnapshotInfo, ExecResult, ExecOptions } from "./types.js";
+import type { SpawnHandle } from "../agent/client.js";
+import type { SnapshotInfo, ExecResult, ExecOptions, SpawnOptions } from "./types.js";
 
 function userSnapshotDir(name: string): string {
   return join(getHearthDir(), "snapshots", name);
@@ -216,19 +217,13 @@ export class Sandbox {
 
   async exec(command: string, opts?: ExecOptions): Promise<ExecResult> {
     this.ensureAlive();
+    return this.agent.exec(wrapCommand(command, opts), { timeout: opts?.timeout });
+  }
 
-    let cmd = command;
-    if (opts?.cwd) {
-      cmd = `cd ${shellEscape(opts.cwd)} && ${cmd}`;
-    }
-    if (opts?.env) {
-      const exports = Object.entries(opts.env)
-        .map(([k, v]) => `export ${k}=${shellEscape(v)}`)
-        .join("; ");
-      cmd = `${exports}; ${cmd}`;
-    }
-
-    return this.agent.exec(cmd, { timeout: opts?.timeout });
+  /** Spawn a long-running command with streaming stdout/stderr. */
+  spawn(command: string, opts?: SpawnOptions): SpawnHandle {
+    this.ensureAlive();
+    return this.agent.spawn(wrapCommand(command, opts), { timeout: opts?.timeout });
   }
 
   async writeFile(path: string, content: string | Buffer): Promise<void> {
@@ -370,6 +365,20 @@ export class Sandbox {
   private ensureAlive(): void {
     if (this.destroyed) throw new Error("Sandbox has been destroyed");
   }
+}
+
+function wrapCommand(command: string, opts?: { cwd?: string; env?: Record<string, string> }): string {
+  let cmd = command;
+  if (opts?.cwd) {
+    cmd = `cd ${shellEscape(opts.cwd)} && ${cmd}`;
+  }
+  if (opts?.env) {
+    const exports = Object.entries(opts.env)
+      .map(([k, v]) => `export ${k}=${shellEscape(v)}`)
+      .join("; ");
+    cmd = `${exports}; ${cmd}`;
+  }
+  return cmd;
 }
 
 function shellEscape(s: string): string {

@@ -90,6 +90,17 @@ Read a file from the sandbox.
 const content = await sandbox.readFile("/etc/hostname");
 ```
 
+### `sandbox.spawn(command, opts?)`
+
+Run a long-running command with streaming stdout/stderr. Unlike `exec()`, output arrives as it's produced.
+
+```typescript
+const proc = sandbox.spawn("npm run dev", { cwd: "/workspace" });
+proc.stdout.on("data", (chunk) => console.log(chunk));
+proc.stderr.on("data", (chunk) => console.error(chunk));
+const { exitCode } = await proc.wait();
+```
+
 ### `sandbox.upload(hostPath, guestPath)`
 
 Recursively copy a directory from the host into the guest. Uses tar streaming over vsock — no base64, no memory buffering.
@@ -187,7 +198,7 @@ docs/                   Specs, design docs, references
 
 **v0.1**: Working `create → exec → destroy` loop with snapshot restore.
 
-**v0.2 (current)**: `npx hearth setup` CLI, vsock port forwarding, tar-based upload/download, user-facing snapshots. 19 tests passing.
+**v0.2 (current)**: `npx hearth setup` CLI, vsock port forwarding, tar-based upload/download, user-facing snapshots, streaming exec. 22 tests passing.
 
 **v0.3**: Observability (Victoria Logs/Metrics, `sandbox.logs.query()`, `sandbox.observe()`), streaming exec, daemon backend.
 

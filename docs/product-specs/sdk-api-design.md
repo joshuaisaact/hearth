@@ -52,11 +52,16 @@ const result = await sandbox.exec("python train.py", {
   timeout: 60_000,
 });
 
-// Streaming
-const proc = await sandbox.spawn("npm run dev");
-proc.stdout.on("data", (chunk) => console.log(chunk));
-proc.stderr.on("data", (chunk) => console.error(chunk));
-await proc.wait();
+// Streaming — output arrives as it's produced
+const proc = sandbox.spawn("npm run dev", { cwd: "/workspace" });
+proc.stdout.on("data", (chunk: string) => console.log(chunk));
+proc.stderr.on("data", (chunk: string) => console.error(chunk));
+const { exitCode } = await proc.wait(); // resolves when process exits
+
+// Kill a long-running process
+const server = sandbox.spawn("node server.js");
+// ... later
+server.kill();
 ```
 
 ### Filesystem

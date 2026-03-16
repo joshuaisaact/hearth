@@ -119,6 +119,39 @@ describe.skipIf(!hasKvm)("Sandbox", () => {
     rmSync(destDir, { recursive: true, force: true });
   }, 30000);
 
+  it("should stream stdout from spawn", async () => {
+    sandbox = await Sandbox.create();
+
+    const proc = sandbox.spawn("echo first && sleep 0.1 && echo second");
+    const chunks: string[] = [];
+    proc.stdout.on("data", (chunk: string) => chunks.push(chunk));
+
+    const { exitCode } = await proc.wait();
+    expect(exitCode).toBe(0);
+    expect(chunks.join("")).toBe("first\nsecond\n");
+    expect(chunks.length).toBeGreaterThanOrEqual(1);
+  }, 30000);
+
+  it("should stream stderr from spawn", async () => {
+    sandbox = await Sandbox.create();
+
+    const proc = sandbox.spawn("echo err >&2");
+    const stderrChunks: string[] = [];
+    proc.stderr.on("data", (chunk: string) => stderrChunks.push(chunk));
+
+    const { exitCode } = await proc.wait();
+    expect(exitCode).toBe(0);
+    expect(stderrChunks.join("")).toBe("err\n");
+  }, 30000);
+
+  it("should report non-zero exit code from spawn", async () => {
+    sandbox = await Sandbox.create();
+
+    const proc = sandbox.spawn("exit 42");
+    const { exitCode } = await proc.wait();
+    expect(exitCode).toBe(42);
+  }, 30000);
+
   it("should snapshot and restore a configured sandbox", async () => {
     // Create and configure
     sandbox = await Sandbox.create();

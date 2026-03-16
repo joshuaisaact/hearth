@@ -9,8 +9,11 @@ export interface ExecResult {
   exitCode: number;
 }
 
-export interface ExecOptions {
+export interface CommandOptions {
   cwd?: string;
   env?: Record<string, string>;
   timeout?: number;
 }
+
+export type ExecOptions = CommandOptions;
+export type SpawnOptions = CommandOptions;

@@ -1,6 +1,14 @@
 import net from "node:net";
 import { unlinkSync } from "node:fs";
+import { EventEmitter } from "node:events";
 import { AgentError } from "../errors.js";
+
+export interface SpawnHandle {
+  stdout: EventEmitter;
+  stderr: EventEmitter;
+  wait(): Promise<{ exitCode: number }>;
+  kill(): void;
+}
 
 export class AgentClient {
   private socket: net.Socket | null = null;
@@ -37,13 +45,18 @@ export class AgentClient {
     });
   }
 
-  private async sendRequest(payload: object): Promise<Record<string, unknown>> {
-    if (!this.socket) throw new AgentError("Agent not connected");
-
+  private encodeMessage(payload: object): Buffer {
     const json = JSON.stringify(payload);
     const buf = Buffer.alloc(4 + json.length);
     buf.writeUInt32LE(json.length, 0);
     buf.write(json, 4);
+    return buf;
+  }
+
+  private async sendRequest(payload: object): Promise<Record<string, unknown>> {
+    if (!this.socket) throw new AgentError("Agent not connected");
+
+    const buf = this.encodeMessage(payload);
 
     return new Promise((resolve, reject) => {
       const socket = this.socket!;
@@ -134,6 +147,87 @@ export class AgentClient {
     }
 
     return Buffer.from(resp.data as string, "base64").toString("utf-8");
+  }
+
+  spawn(
+    command: string,
+    opts?: { timeout?: number },
+  ): SpawnHandle {
+    if (!this.socket) throw new AgentError("Agent not connected");
+
+    const payload: Record<string, unknown> = {
+      method: "spawn",
+      cmd: command,
+    };
+    if (opts?.timeout) payload.timeout = Math.ceil(opts.timeout / 1000);
+
+    const stdoutEmitter = new EventEmitter();
+    const stderrEmitter = new EventEmitter();
+    let exitResolve: (result: { exitCode: number }) => void;
+    const exitPromise = new Promise<{ exitCode: number }>((resolve) => {
+      exitResolve = resolve;
+    });
+
+    const socket = this.socket;
+    const chunks: Buffer[] = [];
+    let totalLen = 0;
+
+    const processMessages = () => {
+      const recvBuf = Buffer.concat(chunks);
+      chunks.length = 0;
+
+      let offset = 0;
+      while (offset + 4 <= recvBuf.length) {
+        const msgLen = recvBuf.readUInt32LE(offset);
+        if (offset + 4 + msgLen > recvBuf.length) break;
+
+        const msgJson = recvBuf.subarray(offset + 4, offset + 4 + msgLen).toString("utf-8");
+        offset += 4 + msgLen;
+
+        try {
+          const msg = JSON.parse(msgJson);
+          if (msg.type === "stdout" && msg.data) {
+            stdoutEmitter.emit("data", Buffer.from(msg.data, "base64").toString("utf-8"));
+          } else if (msg.type === "stderr" && msg.data) {
+            stderrEmitter.emit("data", Buffer.from(msg.data, "base64").toString("utf-8"));
+          } else if (msg.type === "exit") {
+            socket.removeListener("data", onData);
+            exitResolve({ exitCode: msg.code ?? -1 });
+          } else if (msg.ok === false) {
+            socket.removeListener("data", onData);
+            exitResolve({ exitCode: -1 });
+          }
+        } catch {}
+      }
+
+      // Keep any incomplete message for next round
+      if (offset < recvBuf.length) {
+        chunks.push(recvBuf.subarray(offset));
+        totalLen = recvBuf.length - offset;
+      } else {
+        totalLen = 0;
+      }
+    };
+
+    const onData = (chunk: Buffer) => {
+      chunks.push(chunk);
+      totalLen += chunk.length;
+      processMessages();
+    };
+
+    socket.on("data", onData);
+    socket.write(this.encodeMessage(payload));
+
+    return {
+      stdout: stdoutEmitter,
+      stderr: stderrEmitter,
+      wait: () => exitPromise,
+      kill: () => {
+        // Not yet implemented — the process will exit when its timeout fires,
+        // or when the sandbox is destroyed. A protocol extension is needed
+        // to send kill signals to specific child processes.
+      },
+    };
   }
 
   async ping(): Promise<boolean> {

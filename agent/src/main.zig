@@ -184,6 +184,121 @@ fn handleExec(cmd_str: []const u8, timeout: u32, resp_buf: []u8) []const u8 {
     }) catch formatError(resp_buf, "response too large");
 }
 
+var spawn_chunk: [8192]u8 = undefined;
+var spawn_b64: [16384]u8 = undefined;
+var spawn_msg: [32768]u8 = undefined;
+
+fn handleSpawn(sock: linux.fd_t, cmd_str: []const u8, timeout: u32) void {
+    var sh_argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", null };
+
+    var cmd_buf: [4096]u8 = undefined;
+    if (cmd_str.len >= cmd_buf.len) {
+        const e = formatError(&spawn_msg, "command too long");
+        sendMsg(sock, e) catch {};
+        return;
+    }
+    @memcpy(cmd_buf[0..cmd_str.len], cmd_str);
+    cmd_buf[cmd_str.len] = 0;
+    sh_argv[2] = @ptrCast(cmd_buf[0..cmd_str.len :0]);
+
+    var stdout_fds: [2]linux.fd_t = undefined;
+    var stderr_fds: [2]linux.fd_t = undefined;
+
+    const p1: isize = @bitCast(linux.pipe2(&stdout_fds, .{ .CLOEXEC = true }));
+    if (p1 < 0) { sendMsg(sock, formatError(&spawn_msg, "pipe failed")) catch {}; return; }
+    const p2: isize = @bitCast(linux.pipe2(&stderr_fds, .{ .CLOEXEC = true }));
+    if (p2 < 0) {
+        _ = linux.close(stdout_fds[0]);
+        _ = linux.close(stdout_fds[1]);
+        sendMsg(sock, formatError(&spawn_msg, "pipe failed")) catch {};
+        return;
+    }
+
+    const fork_rc: isize = @bitCast(linux.fork());
+    if (fork_rc < 0) {
+        _ = linux.close(stdout_fds[0]); _ = linux.close(stdout_fds[1]);
+        _ = linux.close(stderr_fds[0]); _ = linux.close(stderr_fds[1]);
+        sendMsg(sock, formatError(&spawn_msg, "fork failed")) catch {};
+        return;
+    }
+
+    if (fork_rc == 0) {
+        _ = linux.dup2(stdout_fds[1], 1);
+        _ = linux.dup2(stderr_fds[1], 2);
+        _ = linux.close(stdout_fds[0]); _ = linux.close(stdout_fds[1]);
+        _ = linux.close(stderr_fds[0]); _ = linux.close(stderr_fds[1]);
+        if (timeout > 0) _ = linux.syscall1(.alarm, timeout);
+        const envp = [_:null]?[*:0]const u8{
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "HOME=/root",
+            "TERM=linux",
+        };
+        _ = linux.execve("/bin/sh", @ptrCast(&sh_argv), @ptrCast(&envp));
+        linux.exit_group(127);
+    }
+
+    _ = linux.close(stdout_fds[1]);
+    _ = linux.close(stderr_fds[1]);
+
+    const child_pid: linux.pid_t = @intCast(fork_rc);
+
+    // Stream chunks as they arrive
+    var pfds = [2]linux.pollfd{
+        .{ .fd = stdout_fds[0], .events = linux.POLL.IN, .revents = 0 },
+        .{ .fd = stderr_fds[0], .events = linux.POLL.IN, .revents = 0 },
+    };
+    var open_fds: u8 = 2;
+
+    while (open_fds > 0) {
+        const poll_rc: isize = @bitCast(linux.poll(@ptrCast(&pfds), 2, 300_000));
+        if (poll_rc <= 0) break;
+
+        if (pfds[0].revents & (linux.POLL.IN | linux.POLL.HUP) != 0) {
+            const n: isize = @bitCast(linux.read(stdout_fds[0], &spawn_chunk, spawn_chunk.len));
+            if (n > 0) {
+                sendStreamChunk(sock, "stdout", spawn_chunk[0..@intCast(n)]) catch break;
+            } else {
+                pfds[0].fd = -1;
+                open_fds -= 1;
+            }
+        }
+
+        if (pfds[1].revents & (linux.POLL.IN | linux.POLL.HUP) != 0) {
+            const n: isize = @bitCast(linux.read(stderr_fds[0], &spawn_chunk, spawn_chunk.len));
+            if (n > 0) {
+                sendStreamChunk(sock, "stderr", spawn_chunk[0..@intCast(n)]) catch break;
+            } else {
+                pfds[1].fd = -1;
+                open_fds -= 1;
+            }
+        }
+    }
+
+    _ = linux.close(stdout_fds[0]);
+    _ = linux.close(stderr_fds[0]);
+
+    var wstatus: u32 = 0;
+    _ = linux.waitpid(child_pid, &wstatus, 0);
+    const exit_code: i32 = if (wstatus & 0x7f == 0) @intCast((wstatus >> 8) & 0xff) else -1;
+
+    // Send exit message
+    const exit_msg = std.fmt.bufPrint(&spawn_msg,
+        \\{{"type":"exit","code":{}}}
+    , .{exit_code}) catch return;
+    sendMsg(sock, exit_msg) catch {};
+}
+
+fn sendStreamChunk(sock: linux.fd_t, stream_type: []const u8, data: []const u8) !void {
+    const b64_len = std.base64.standard.Encoder.calcSize(data.len);
+    if (b64_len > spawn_b64.len) return;
+    _ = std.base64.standard.Encoder.encode(spawn_b64[0..b64_len], data);
+
+    const msg = std.fmt.bufPrint(&spawn_msg,
+        \\{{"type":"{s}","data":"{s}"}}
+    , .{ stream_type, spawn_b64[0..b64_len] }) catch return;
+    try sendMsg(sock, msg);
+}
+
 fn readFully(fd: linux.fd_t, buf: []u8) usize {
     var total: usize = 0;
     while (total < buf.len) {
@@ -616,6 +731,14 @@ pub fn main() !void {
                     break :blk formatError(&main_resp_buf, "missing path");
                 };
                 break :blk handleReadFile(path, &main_resp_buf);
+            } else if (std.mem.eql(u8, method, "spawn")) blk: {
+                const cmd = jsonStr(payload, "cmd") orelse {
+                    break :blk formatError(&main_resp_buf, "missing cmd");
+                };
+                const timeout = jsonU32(payload, "timeout");
+                // spawn sends multiple messages directly — no single response
+                handleSpawn(sock, cmd, timeout);
+                continue;
             } else if (std.mem.eql(u8, method, "ping")) blk: {
                 break :blk std.fmt.bufPrint(&main_resp_buf, "{{\"ok\":true}}", .{}) catch "{}";
             } else blk: {
