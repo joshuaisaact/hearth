@@ -246,6 +246,10 @@ async function limaSetup(opts: SetupOpts): Promise<void> {
     console.log("    await client.connect();");
     console.log("    const sandbox = await client.create();");
     console.log('    const result = await sandbox.exec("echo hello from a microVM");');
+  } catch (err) {
+    console.error(`\n  Setup failed: ${err instanceof Error ? err.message : err}`);
+    console.error("  To clean up: hearth lima teardown");
+    process.exit(1);
   } finally {
     try { unlinkSync(configPath); } catch {}
   }
@@ -305,6 +309,7 @@ function limaStop(): void {
     } catch {}
     console.log("  Stopping Lima VM...");
     limactlSync(["stop", INSTANCE_NAME]);
+    try { unlinkSync(daemonHostSocket()); } catch {}
     console.log("  ✓ Stopped");
   } else {
     console.log("  Lima VM already stopped");
