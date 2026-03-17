@@ -101,9 +101,24 @@ Local-first + observability + snapshots is the winning combination for serious a
 - Snapshot trees for branching and rollback
 - Everything running on hardware you control
 
+## Platform Support
+
+Hearth's local-first approach means dealing with KVM access on each platform:
+
+| Platform | Approach | Snapshot | Audience |
+|---|---|---|---|
+| Linux | Native KVM | Yes | 100% of Linux devs |
+| Windows | WSL2 (native KVM) | Yes | ~all Windows devs |
+| macOS M3+ | Lima + nested KVM | Yes | ~40-55% of Mac devs (growing) |
+| macOS M1/M2 | Remote daemon | Yes | Remaining Mac devs |
+
+WSL2 is the easiest win — zero code changes. Lima on M3+ works today with the daemon we already built. M1/M2 is the gap — libkrun (native microVMs via Apple HVF, used by Podman) could fill it in a future release, trading snapshot support for universal Mac coverage.
+
 ## Entrants to Watch
 
 - **Alibaba OpenSandbox** — most comprehensive OSS offering. If they add a clean agent-first SDK, they compete directly with Hearth's self-hosted positioning.
 - **K8s Agent Sandbox** — the natural path if your infra is Kubernetes. Warm pools bring startup under 1s.
 - **Freestyle** — live VM forking is close to our snapshot vision. Cloud-only today.
 - **Daytona** — self-hostable with the best cold start. If they add Firecracker isolation (not just Docker), they cover more of our space.
+- **libkrun/krunvm** — native microVMs on all Apple Silicon via HVF. No nested KVM needed. Potential future Hearth backend for macOS M1/M2.
+- **Apple Containerization** — WWDC 2025, full macOS 26. Per-container VM isolation on all Apple Silicon. Could be a future Hearth backend.

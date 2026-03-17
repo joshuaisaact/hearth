@@ -35,11 +35,40 @@ Cloud sandboxes (E2B, Daytona, Modal) add latency, cost, and a dependency on som
 
 ## Requirements
 
-- Linux with `/dev/kvm` access (bare metal or nested virt)
+- `/dev/kvm` access (Linux kernel with KVM support)
 - Node.js 20+
-- Firecracker v1.15.0, guest kernel, and Ubuntu rootfs at `~/.hearth/` (see setup below)
+- Docker (for building the rootfs)
+- Zig (for building the guest agent)
 
-macOS/Windows: use WSL2 or a Linux VM. Firecracker requires KVM.
+### Platform Support
+
+**Linux** — native. Works out of the box on any Linux with KVM.
+
+**Windows (WSL2)** — works natively. WSL2 includes a real Linux kernel with `/dev/kvm` support. Install WSL2 and run everything inside it:
+
+```bash
+wsl --install                  # one-time
+wsl                            # enter Linux environment
+# Everything below runs inside WSL2 — /dev/kvm is available
+npx hearth setup
+```
+
+No additional configuration needed. WSL2 has supported KVM since 2022.
+
+**macOS (M3+ with macOS 15+)** — via Lima. Requires nested virtualization, which Apple only supports on M3 and newer chips:
+
+```bash
+brew install lima
+limactl create --name hearth --set '.nestedVirtualization=true' template://default
+limactl start hearth
+limactl shell hearth            # enter Linux environment
+npx hearth setup                # Firecracker runs inside the Lima VM
+hearth daemon                   # start daemon, accessible from macOS via shared mount
+```
+
+**macOS (M1/M2)** — use a remote Linux host. M1/M2 Macs cannot do nested virtualization. Options:
+- Connect to a Linux server running `hearth daemon` (Hetzner bare metal from ~$35/mo)
+- Use the `DaemonClient` from the SDK to connect over SSH tunnel
 
 ## Setup
 
