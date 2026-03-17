@@ -6,11 +6,8 @@ if (command === "setup") {
   await import("./setup.js");
 } else if (command === "daemon") {
   const { startDaemon, DAEMON_SOCK } = await import("../daemon/server.js");
-  const portIdx = process.argv.indexOf("--port");
-  const portVal = portIdx !== -1 && process.argv[portIdx + 1] ? parseInt(process.argv[portIdx + 1], 10) : undefined;
-  const target = portVal ? { host: "0.0.0.0", port: portVal } : undefined;
-  const server = startDaemon(target);
-  console.log(`hearth daemon listening on ${portVal ? `0.0.0.0:${portVal}` : DAEMON_SOCK}`);
+  const server = startDaemon();
+  console.log(`hearth daemon listening on ${DAEMON_SOCK}`);
   process.on("SIGINT", () => { server.close(); process.exit(0); });
   process.on("SIGTERM", () => { server.close(); process.exit(0); });
 } else if (command === "lima") {
