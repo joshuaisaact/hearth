@@ -4,7 +4,7 @@ import {
   readdirSync, readFileSync, writeFileSync,
 } from "node:fs";
 import { copyFile, rename } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
 import { FirecrackerApi } from "../vm/api.js";
@@ -26,12 +26,10 @@ import type { SpawnHandle } from "../agent/client.js";
 import type { SnapshotInfo, ExecResult, ExecOptions, SpawnOptions } from "./types.js";
 
 function userSnapshotDir(name: string): string {
-  const snapshotsDir = join(getHearthDir(), "snapshots");
-  const resolved = resolve(snapshotsDir, name);
-  if (resolved !== snapshotsDir && !resolved.startsWith(snapshotsDir + "/")) {
+  if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
     throw new Error(`Invalid snapshot name: ${name}`);
   }
-  return resolved;
+  return join(getHearthDir(), "snapshots", name);
 }
 
 const activeSandboxes = new Set<Sandbox>();
@@ -179,10 +177,6 @@ export class Sandbox {
    */
   async snapshot(name: string): Promise<string> {
     this.ensureAlive();
-
-    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-      throw new Error("Snapshot name must be alphanumeric, hyphens, or underscores");
-    }
 
     const snapDir = userSnapshotDir(name);
     if (existsSync(snapDir)) {

@@ -20,13 +20,13 @@ export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export function requireStr(val: string | undefined, field: string): string {
-  if (val === undefined) throw new Error(`Missing required field: ${field}`);
+export function requireStr(val: unknown, field: string): string {
+  if (typeof val !== "string" || val === "") throw new Error(`Missing or invalid field: ${field}`);
   return val;
 }
 
-export function requireNum(val: number | undefined, field: string): number {
-  if (val === undefined) throw new Error(`Missing required field: ${field}`);
+export function requireNum(val: unknown, field: string): number {
+  if (typeof val !== "number") throw new Error(`Missing or invalid field: ${field}`);
   return val;
 }
 
