@@ -6,7 +6,7 @@ import { getHearthDir } from "../vm/binary.js";
 import { errorMessage, encodeMessage, parseFrames } from "../util.js";
 import type { SpawnHandle } from "../agent/client.js";
 
-const DAEMON_SOCK = join(getHearthDir(), "daemon.sock");
+const DAEMON_SOCK = process.env.HEARTH_DAEMON_SOCK ?? join(getHearthDir(), "daemon.sock");
 
 interface ActiveSandbox {
   sandbox: Sandbox;

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { ResourceError } from "../errors.js";
 
-const HEARTH_DIR = join(homedir(), ".hearth");
+const HEARTH_DIR = process.env.HEARTH_DIR ?? join(homedir(), ".hearth");
 
 export function getFirecrackerPath(): string {
   const bundled = join(HEARTH_DIR, "bin", "firecracker");

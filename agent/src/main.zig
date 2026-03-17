@@ -24,6 +24,26 @@ const SockaddrVm = extern struct {
     }
 };
 
+/// Set a SIGALRM timer using setitimer (works on both x86_64 and aarch64).
+fn setAlarm(seconds: usize) void {
+    // struct itimerval: { it_interval: timeval, it_value: timeval }
+    // timeval: { tv_sec: isize, tv_usec: isize }
+    // On aarch64 Linux there's no alarm syscall — use setitimer(ITIMER_REAL, ...).
+    const Timeval = extern struct { tv_sec: isize, tv_usec: isize };
+    const Itimerval = extern struct { it_interval: Timeval, it_value: Timeval };
+    const val = Itimerval{
+        .it_interval = .{ .tv_sec = 0, .tv_usec = 0 },
+        .it_value = .{ .tv_sec = @intCast(seconds), .tv_usec = 0 },
+    };
+    // setitimer(ITIMER_REAL=0, &val, null)
+    const rc = linux.syscall3(.setitimer, 0, @intFromPtr(&val), 0);
+    if (@as(isize, @bitCast(rc)) < 0) {
+        // If setitimer fails, write a warning to stderr. The process will run without a timeout.
+        const msg = "warning: setitimer failed, no exec timeout\n";
+        _ = linux.write(2, msg, msg.len);
+    }
+}
+
 fn writeAll(fd: linux.fd_t, data: []const u8) !void {
     var written: usize = 0;
     while (written < data.len) {
@@ -137,7 +157,7 @@ fn handleExec(cmd_str: []const u8, timeout: u32, resp_buf: []u8) []const u8 {
         _ = linux.close(stderr_fds[1]);
 
         if (timeout > 0) {
-            _ = linux.syscall1(.alarm, timeout);
+            setAlarm(timeout);
         }
 
         const envp = [_:null]?[*:0]const u8{
@@ -227,7 +247,7 @@ fn handleSpawn(sock: linux.fd_t, cmd_str: []const u8, timeout: u32) void {
         _ = linux.dup2(stderr_fds[1], 2);
         _ = linux.close(stdout_fds[0]); _ = linux.close(stdout_fds[1]);
         _ = linux.close(stderr_fds[0]); _ = linux.close(stderr_fds[1]);
-        if (timeout > 0) _ = linux.syscall1(.alarm, timeout);
+        if (timeout > 0) setAlarm(timeout);
         const envp = [_:null]?[*:0]const u8{
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "HOME=/root",
