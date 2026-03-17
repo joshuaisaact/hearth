@@ -4,7 +4,7 @@ import {
   readdirSync, readFileSync, writeFileSync,
 } from "node:fs";
 import { copyFile, rename } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
 import { FirecrackerApi } from "../vm/api.js";
@@ -26,7 +26,12 @@ import type { SpawnHandle } from "../agent/client.js";
 import type { SnapshotInfo, ExecResult, ExecOptions, SpawnOptions } from "./types.js";
 
 function userSnapshotDir(name: string): string {
-  return join(getHearthDir(), "snapshots", name);
+  const snapshotsDir = join(getHearthDir(), "snapshots");
+  const resolved = resolve(snapshotsDir, name);
+  if (resolved !== snapshotsDir && !resolved.startsWith(snapshotsDir + "/")) {
+    throw new Error(`Invalid snapshot name: ${name}`);
+  }
+  return resolved;
 }
 
 const activeSandboxes = new Set<Sandbox>();
