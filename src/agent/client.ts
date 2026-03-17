@@ -2,6 +2,7 @@ import net from "node:net";
 import { unlinkSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { AgentError } from "../errors.js";
+import { encodeMessage } from "../util.js";
 
 export interface SpawnHandle {
   stdout: EventEmitter;
@@ -45,18 +46,10 @@ export class AgentClient {
     });
   }
 
-  private encodeMessage(payload: object): Buffer {
-    const json = JSON.stringify(payload);
-    const buf = Buffer.alloc(4 + json.length);
-    buf.writeUInt32LE(json.length, 0);
-    buf.write(json, 4);
-    return buf;
-  }
-
   private async sendRequest(payload: object): Promise<Record<string, unknown>> {
     if (!this.socket) throw new AgentError("Agent not connected");
 
-    const buf = this.encodeMessage(payload);
+    const buf = encodeMessage(payload);
 
     return new Promise((resolve, reject) => {
       const socket = this.socket!;
@@ -216,7 +209,7 @@ export class AgentClient {
     };
 
     socket.on("data", onData);
-    socket.write(this.encodeMessage(payload));
+    socket.write(encodeMessage(payload));
 
     return {
       stdout: stdoutEmitter,

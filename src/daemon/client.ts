@@ -1,12 +1,12 @@
 import net from "node:net";
 import { EventEmitter } from "node:events";
+import { encodeMessage, parseFrames } from "../util.js";
 import type { ExecResult, ExecOptions, SpawnOptions, SnapshotInfo } from "../sandbox/types.js";
 import type { SpawnHandle } from "../agent/client.js";
 
 /**
  * Client for the Hearth daemon. Provides the same API as the Sandbox class
  * but proxies all operations through a Unix socket to the daemon process.
- * Used on macOS (via Lima) or for multi-process sandbox access.
  */
 export class DaemonClient {
   private conn: net.Socket | null = null;
@@ -36,39 +36,26 @@ export class DaemonClient {
   private startReading(): void {
     if (!this.conn) return;
 
-    const chunks: Buffer[] = [];
-    let totalLen = 0;
+    let remainder: Buffer = Buffer.alloc(0);
 
     this.conn.on("data", (chunk: Buffer) => {
-      chunks.push(chunk);
-      totalLen += chunk.length;
+      const combined: Buffer = remainder.length > 0
+        ? Buffer.concat([remainder, chunk])
+        : chunk;
 
-      const buf = Buffer.concat(chunks);
-      chunks.length = 0;
+      const result = parseFrames(combined);
+      remainder = result.remainder;
 
-      let offset = 0;
-      while (offset + 4 <= buf.length) {
-        const msgLen = buf.readUInt32LE(offset);
-        if (offset + 4 + msgLen > buf.length) break;
-
-        const json = buf.subarray(offset + 4, offset + 4 + msgLen).toString("utf-8");
-        offset += 4 + msgLen;
-
-        const msg = JSON.parse(json);
-        this.handleResponse(msg);
-      }
-
-      if (offset < buf.length) {
-        chunks.push(buf.subarray(offset));
-        totalLen = buf.length - offset;
-      } else {
-        totalLen = 0;
+      for (const json of result.messages) {
+        try {
+          this.handleResponse(JSON.parse(json));
+        } catch {}
       }
     });
   }
 
   private handleResponse(msg: any): void {
-    // Spawn stream events don't have a reqId
+    // Spawn stream events
     if (msg.event && msg.spawnId !== undefined) {
       const listener = this.spawnListeners.get(msg.spawnId);
       if (!listener) return;
@@ -84,17 +71,16 @@ export class DaemonClient {
       return;
     }
 
-    // Regular request/response — resolve the first pending request
-    // (In a production implementation, each request would have an ID
-    //  for correlation. For now, FIFO ordering works because we await
-    //  each request before sending the next.)
-    const [reqId, handler] = this.pending.entries().next().value ?? [];
-    if (reqId !== undefined && handler) {
-      this.pending.delete(reqId);
-      if (msg.error) {
-        handler.reject(new Error(msg.error));
-      } else {
-        handler.resolve(msg);
+    // Request/response — match by reqId
+    if (msg.reqId !== undefined) {
+      const handler = this.pending.get(msg.reqId);
+      if (handler) {
+        this.pending.delete(msg.reqId);
+        if (msg.error) {
+          handler.reject(new Error(msg.error));
+        } else {
+          handler.resolve(msg);
+        }
       }
     }
   }
@@ -107,12 +93,7 @@ export class DaemonClient {
       }
       const reqId = this.nextReqId++;
       this.pending.set(reqId, { resolve, reject });
-
-      const json = JSON.stringify(msg);
-      const buf = Buffer.alloc(4 + json.length);
-      buf.writeUInt32LE(json.length, 0);
-      buf.write(json, 4);
-      this.conn.write(buf);
+      this.conn.write(encodeMessage({ ...msg, reqId }));
     });
   }
 
@@ -134,7 +115,7 @@ export class DaemonClient {
     await this.request({ method: "deleteSnapshot", name });
   }
 
-  // Internal methods called by RemoteSandbox
+  /** @internal Called by RemoteSandbox */
   _exec(sandboxId: string, command: string, opts?: ExecOptions): Promise<ExecResult> {
     return this.request({ method: "exec", sandboxId, command, opts }).then((r) => ({
       stdout: r.stdout,
@@ -143,6 +124,7 @@ export class DaemonClient {
     }));
   }
 
+  /** @internal */
   _spawn(sandboxId: string, command: string, opts?: SpawnOptions): SpawnHandle {
     const stdout = new EventEmitter();
     const stderr = new EventEmitter();
@@ -163,23 +145,28 @@ export class DaemonClient {
     };
   }
 
+  /** @internal */
   _writeFile(sandboxId: string, path: string, content: string | Buffer): Promise<void> {
     const strContent = Buffer.isBuffer(content) ? content.toString("utf-8") : content;
     return this.request({ method: "writeFile", sandboxId, path, content: strContent }).then(() => {});
   }
 
+  /** @internal */
   _readFile(sandboxId: string, path: string): Promise<string> {
     return this.request({ method: "readFile", sandboxId, path }).then((r) => r.content);
   }
 
+  /** @internal */
   _upload(sandboxId: string, hostPath: string, guestPath: string): Promise<void> {
     return this.request({ method: "upload", sandboxId, hostPath, guestPath }).then(() => {});
   }
 
+  /** @internal */
   _download(sandboxId: string, guestPath: string, hostPath: string): Promise<void> {
     return this.request({ method: "download", sandboxId, guestPath, hostPath }).then(() => {});
   }
 
+  /** @internal */
   _forwardPort(sandboxId: string, guestPort: number): Promise<{ host: string; port: number }> {
     return this.request({ method: "forwardPort", sandboxId, guestPort }).then((r) => ({
       host: r.host,
@@ -187,14 +174,17 @@ export class DaemonClient {
     }));
   }
 
+  /** @internal */
   _enableInternet(sandboxId: string): Promise<void> {
     return this.request({ method: "enableInternet", sandboxId }).then(() => {});
   }
 
+  /** @internal */
   _snapshot(sandboxId: string, name: string): Promise<string> {
     return this.request({ method: "snapshot", sandboxId, name }).then((r) => r.name);
   }
 
+  /** @internal */
   _destroy(sandboxId: string): Promise<void> {
     return this.request({ method: "destroy", sandboxId }).then(() => {});
   }
@@ -207,10 +197,6 @@ export class DaemonClient {
   }
 }
 
-/**
- * A sandbox handle that proxies all operations through the daemon.
- * Same interface as Sandbox but all calls go over the Unix socket.
- */
 export class RemoteSandbox {
   private client: DaemonClient;
   private sandboxId: string;
@@ -258,5 +244,9 @@ export class RemoteSandbox {
 
   destroy(): Promise<void> {
     return this.client._destroy(this.sandboxId);
+  }
+
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.destroy();
   }
 }

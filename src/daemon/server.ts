@@ -3,7 +3,7 @@ import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { Sandbox } from "../sandbox/sandbox.js";
 import { getHearthDir } from "../vm/binary.js";
-import { errorMessage } from "../util.js";
+import { errorMessage, encodeMessage, parseFrames } from "../util.js";
 import type { SpawnHandle } from "../agent/client.js";
 
 const DAEMON_SOCK = join(getHearthDir(), "daemon.sock");
@@ -13,174 +13,177 @@ interface ActiveSandbox {
   spawns: Map<number, SpawnHandle>;
 }
 
-/**
- * Start the Hearth daemon. Listens on ~/.hearth/daemon.sock.
- * Exposes the full Sandbox API over length-prefixed JSON RPC.
- */
 export function startDaemon(): net.Server {
   try { unlinkSync(DAEMON_SOCK); } catch {}
 
-  const sandboxes = new Map<string, ActiveSandbox>();
-  let nextId = 1;
-  let nextSpawnId = 1;
-
   const server = net.createServer((conn) => {
-    let recvBuf = Buffer.alloc(0);
+    const sandboxes = new Map<string, ActiveSandbox>();
+    let nextId = 1;
+    let nextSpawnId = 1;
+    const chunks: Buffer[] = [];
+    let totalLen = 0;
+
+    // Serial message queue — process one at a time to prevent races
+    let processing = Promise.resolve();
 
     conn.on("data", (chunk: Buffer) => {
-      recvBuf = Buffer.concat([recvBuf, chunk]);
+      chunks.push(chunk);
+      totalLen += chunk.length;
 
-      while (recvBuf.length >= 4) {
-        const msgLen = recvBuf.readUInt32LE(0);
-        if (recvBuf.length < 4 + msgLen) break;
+      const combined = Buffer.concat(chunks);
+      chunks.length = 0;
+      const { messages, remainder } = parseFrames(combined);
 
-        const json = recvBuf.subarray(4, 4 + msgLen).toString("utf-8");
-        recvBuf = recvBuf.subarray(4 + msgLen);
+      if (remainder.length > 0) {
+        chunks.push(remainder);
+        totalLen = remainder.length;
+      } else {
+        totalLen = 0;
+      }
 
-        handleMessage(json, sandboxes, nextId, nextSpawnId, conn)
-          .then(({ response, idInc, spawnIdInc }) => {
-            if (idInc) nextId++;
-            if (spawnIdInc) nextSpawnId++;
-            sendMessage(conn, response);
-          })
-          .catch((err) => {
-            sendMessage(conn, { error: errorMessage(err) });
-          });
+      for (const json of messages) {
+        processing = processing.then(async () => {
+          try {
+            const msg = JSON.parse(json);
+            const reqId = msg.reqId;
+            const response = await handleMessage(msg, sandboxes, () => nextId++, () => nextSpawnId++, conn);
+            sendResponse(conn, { ...response, reqId });
+          } catch (err) {
+            sendResponse(conn, { error: errorMessage(err) });
+          }
+        });
       }
     });
 
     conn.on("close", () => {
-      // Clean up sandboxes owned by this connection
-      // (In a production daemon, sandboxes would outlive connections.
-      //  For now, each connection owns its sandboxes.)
+      // Clean up all sandboxes owned by this connection
+      for (const [id, active] of sandboxes) {
+        try { active.sandbox.destroySync(); } catch {}
+      }
+      sandboxes.clear();
     });
   });
 
-  server.listen(DAEMON_SOCK, () => {
-    // Daemon ready
-  });
-
+  server.listen(DAEMON_SOCK);
   return server;
 }
 
 async function handleMessage(
-  json: string,
+  msg: any,
   sandboxes: Map<string, ActiveSandbox>,
-  nextId: number,
-  nextSpawnId: number,
+  allocId: () => number,
+  allocSpawnId: () => number,
   conn: net.Socket,
-): Promise<{ response: object; idInc?: boolean; spawnIdInc?: boolean }> {
-  const msg = JSON.parse(json);
-  const { method, id } = msg;
+): Promise<object> {
+  const { method } = msg;
 
   switch (method) {
     case "create": {
       const sandbox = await Sandbox.create();
-      const sandboxId = `sb_${nextId}`;
+      const sandboxId = `sb_${allocId()}`;
       sandboxes.set(sandboxId, { sandbox, spawns: new Map() });
-      return { response: { ok: true, sandboxId }, idInc: true };
+      return { ok: true, sandboxId };
     }
 
     case "fromSnapshot": {
       const sandbox = await Sandbox.fromSnapshot(msg.name);
-      const sandboxId = `sb_${nextId}`;
+      const sandboxId = `sb_${allocId()}`;
       sandboxes.set(sandboxId, { sandbox, spawns: new Map() });
-      return { response: { ok: true, sandboxId }, idInc: true };
+      return { ok: true, sandboxId };
     }
 
     case "exec": {
       const active = getSandbox(sandboxes, msg.sandboxId);
       const result = await active.sandbox.exec(msg.command, msg.opts);
-      return { response: { ok: true, ...result } };
+      return { ok: true, ...result };
     }
 
     case "spawn": {
       const active = getSandbox(sandboxes, msg.sandboxId);
       const handle = active.sandbox.spawn(msg.command, msg.opts);
-      const spawnId = nextSpawnId;
+      const spawnId = allocSpawnId();
       active.spawns.set(spawnId, handle);
 
-      // Stream stdout/stderr as separate messages
       handle.stdout.on("data", (data: string) => {
-        sendMessage(conn, { event: "stdout", spawnId, data });
+        sendResponse(conn, { event: "stdout", spawnId, data });
       });
       handle.stderr.on("data", (data: string) => {
-        sendMessage(conn, { event: "stderr", spawnId, data });
+        sendResponse(conn, { event: "stderr", spawnId, data });
       });
       handle.wait().then(({ exitCode }) => {
-        sendMessage(conn, { event: "exit", spawnId, exitCode });
+        sendResponse(conn, { event: "exit", spawnId, exitCode });
         active.spawns.delete(spawnId);
       });
 
-      return { response: { ok: true, spawnId }, spawnIdInc: true };
+      return { ok: true, spawnId };
     }
 
     case "writeFile": {
       const active = getSandbox(sandboxes, msg.sandboxId);
       await active.sandbox.writeFile(msg.path, msg.content);
-      return { response: { ok: true } };
+      return { ok: true };
     }
 
     case "readFile": {
       const active = getSandbox(sandboxes, msg.sandboxId);
       const content = await active.sandbox.readFile(msg.path);
-      return { response: { ok: true, content } };
+      return { ok: true, content };
     }
 
     case "upload": {
       const active = getSandbox(sandboxes, msg.sandboxId);
       await active.sandbox.upload(msg.hostPath, msg.guestPath);
-      return { response: { ok: true } };
+      return { ok: true };
     }
 
     case "download": {
       const active = getSandbox(sandboxes, msg.sandboxId);
       await active.sandbox.download(msg.guestPath, msg.hostPath);
-      return { response: { ok: true } };
+      return { ok: true };
     }
 
     case "forwardPort": {
       const active = getSandbox(sandboxes, msg.sandboxId);
       const { host, port } = await active.sandbox.forwardPort(msg.guestPort);
-      return { response: { ok: true, host, port } };
+      return { ok: true, host, port };
     }
 
     case "enableInternet": {
       const active = getSandbox(sandboxes, msg.sandboxId);
       await active.sandbox.enableInternet();
-      return { response: { ok: true } };
+      return { ok: true };
     }
 
     case "snapshot": {
       const active = getSandbox(sandboxes, msg.sandboxId);
       const name = await active.sandbox.snapshot(msg.name);
-      sandboxes.delete(msg.sandboxId); // sandbox is destroyed after snapshot
-      return { response: { ok: true, name } };
+      sandboxes.delete(msg.sandboxId);
+      return { ok: true, name };
     }
 
     case "destroy": {
       const active = getSandbox(sandboxes, msg.sandboxId);
       await active.sandbox.destroy();
       sandboxes.delete(msg.sandboxId);
-      return { response: { ok: true } };
+      return { ok: true };
     }
 
     case "listSnapshots": {
       const snapshots = Sandbox.listSnapshots();
-      return { response: { ok: true, snapshots } };
+      return { ok: true, snapshots };
     }
 
     case "deleteSnapshot": {
       Sandbox.deleteSnapshot(msg.name);
-      return { response: { ok: true } };
+      return { ok: true };
     }
 
     case "ping": {
-      return { response: { ok: true } };
+      return { ok: true };
     }
 
     default:
-      return { response: { error: `unknown method: ${method}` } };
+      return { error: `unknown method: ${method}` };
   }
 }
 
@@ -190,12 +193,8 @@ function getSandbox(sandboxes: Map<string, ActiveSandbox>, id: string): ActiveSa
   return active;
 }
 
-function sendMessage(conn: net.Socket, msg: object): void {
-  const json = JSON.stringify(msg);
-  const buf = Buffer.alloc(4 + json.length);
-  buf.writeUInt32LE(json.length, 0);
-  buf.write(json, 4);
-  conn.write(buf);
+function sendResponse(conn: net.Socket, msg: object): void {
+  conn.write(encodeMessage(msg));
 }
 
 export { DAEMON_SOCK };
