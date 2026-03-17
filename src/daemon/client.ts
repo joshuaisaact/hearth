@@ -89,7 +89,7 @@ export class DaemonClient {
         listener.stderr.emit("data", msg.data);
       } else if (msg.event === "exit") {
         listener.exitResolve({ exitCode: msg.exitCode ?? 1 });
-        this.spawnListeners.delete(msg.spawnId!);
+        this.spawnListeners.delete(msg.spawnId);
       }
       return;
     }
@@ -122,12 +122,14 @@ export class DaemonClient {
 
   async create(): Promise<RemoteSandbox> {
     const resp = await this.request({ method: "create" });
-    return new RemoteSandbox(this, resp.sandboxId!);
+    if (!resp.sandboxId) throw new Error("Daemon did not return sandboxId");
+    return new RemoteSandbox(this, resp.sandboxId);
   }
 
   async fromSnapshot(name: string): Promise<RemoteSandbox> {
     const resp = await this.request({ method: "fromSnapshot", name });
-    return new RemoteSandbox(this, resp.sandboxId!);
+    if (!resp.sandboxId) throw new Error("Daemon did not return sandboxId");
+    return new RemoteSandbox(this, resp.sandboxId);
   }
 
   listSnapshots(): Promise<SnapshotInfo[]> {
@@ -157,7 +159,10 @@ export class DaemonClient {
     });
 
     this.request({ method: "spawn", sandboxId, command, opts }).then((r) => {
-      this.spawnListeners.set(r.spawnId!, { stdout, stderr, exitResolve: exitResolve! });
+      if (r.spawnId === undefined) { exitResolve({ exitCode: 1 }); return; }
+      this.spawnListeners.set(r.spawnId, { stdout, stderr, exitResolve });
+    }).catch(() => {
+      exitResolve({ exitCode: 1 });
     });
 
     return {

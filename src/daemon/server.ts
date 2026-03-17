@@ -9,6 +9,21 @@ import type { ExecOptions, SpawnOptions } from "../sandbox/types.js";
 
 const DAEMON_SOCK = process.env.HEARTH_DAEMON_SOCK ?? join(getHearthDir(), "daemon.sock");
 
+interface DaemonResponse {
+  ok?: boolean;
+  error?: string;
+  sandboxId?: string;
+  spawnId?: number;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+  content?: string;
+  host?: string;
+  port?: number;
+  name?: string;
+  snapshots?: unknown;
+}
+
 /** Incoming daemon request — discriminated by method. */
 interface DaemonRequest {
   reqId: number;
@@ -62,10 +77,15 @@ export function startDaemon(): net.Server {
           let reqId: number | undefined;
           try {
             const msg = JSON.parse(json) as DaemonRequest;
-            reqId = msg.reqId;
+            reqId = typeof msg.reqId === "number" ? msg.reqId : undefined;
             const response = await handleMessage(msg, sandboxes, () => nextId++, () => nextSpawnId++, conn);
             sendResponse(conn, { ...response, reqId });
           } catch (err) {
+            // Try to extract reqId from raw JSON if parse succeeded but handler threw
+            if (reqId === undefined) {
+              const match = json.match(/"reqId"\s*:\s*(\d+)/);
+              if (match) reqId = parseInt(match[1], 10);
+            }
             sendResponse(conn, { error: errorMessage(err), reqId });
           }
         });
@@ -91,7 +111,7 @@ async function handleMessage(
   allocId: () => number,
   allocSpawnId: () => number,
   conn: net.Socket,
-): Promise<object> {
+): Promise<DaemonResponse> {
   switch (msg.method) {
     case "create": {
       const sandbox = await Sandbox.create();
@@ -127,6 +147,9 @@ async function handleMessage(
       });
       handle.wait().then(({ exitCode }) => {
         sendResponse(conn, { event: "exit", spawnId, exitCode });
+        active.spawns.delete(spawnId);
+      }).catch(() => {
+        sendResponse(conn, { event: "exit", spawnId, exitCode: 1 });
         active.spawns.delete(spawnId);
       });
 
