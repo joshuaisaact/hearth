@@ -6,15 +6,21 @@ import { getHearthDir } from "../vm/binary.js";
 import { errorMessage, encodeMessage, parseFrames } from "../util.js";
 import type { SpawnHandle } from "../agent/client.js";
 
-const DAEMON_SOCK = join(getHearthDir(), "daemon.sock");
+const DEFAULT_DAEMON_SOCK = join(getHearthDir(), "daemon.sock");
 
 interface ActiveSandbox {
   sandbox: Sandbox;
   spawns: Map<number, SpawnHandle>;
 }
 
-export function startDaemon(): net.Server {
-  try { unlinkSync(DAEMON_SOCK); } catch {}
+/** Listen address: Unix socket path, or { host, port } for TCP. */
+export type ListenTarget = string | { host: string; port: number };
+
+export function startDaemon(target?: ListenTarget): net.Server {
+  const listenOn = target ?? DEFAULT_DAEMON_SOCK;
+  if (typeof listenOn === "string") {
+    try { unlinkSync(listenOn); } catch {}
+  }
 
   const server = net.createServer((conn) => {
     const sandboxes = new Map<string, ActiveSandbox>();
@@ -64,8 +70,16 @@ export function startDaemon(): net.Server {
     });
   });
 
-  server.listen(DAEMON_SOCK);
+  if (typeof listenOn === "string") {
+    server.listen(listenOn);
+  } else {
+    server.listen(listenOn.port, listenOn.host);
+  }
   return server;
+}
+
+export function getDaemonSocketPath(): string {
+  return DEFAULT_DAEMON_SOCK;
 }
 
 async function handleMessage(
@@ -197,4 +211,4 @@ function sendResponse(conn: net.Socket, msg: object): void {
   conn.write(encodeMessage(msg));
 }
 
-export { DAEMON_SOCK };
+export { DEFAULT_DAEMON_SOCK as DAEMON_SOCK };
