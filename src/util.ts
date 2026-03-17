@@ -20,6 +20,16 @@ export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+export function requireStr(val: string | undefined, field: string): string {
+  if (val === undefined) throw new Error(`Missing required field: ${field}`);
+  return val;
+}
+
+export function requireNum(val: number | undefined, field: string): number {
+  if (val === undefined) throw new Error(`Missing required field: ${field}`);
+  return val;
+}
+
 /** Encode a JSON object as a length-prefixed buffer (4-byte LE length + UTF-8 JSON). */
 export function encodeMessage(msg: object): Buffer {
   const json = JSON.stringify(msg);

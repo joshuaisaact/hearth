@@ -313,8 +313,8 @@ function reportFilesystem() {
   console.log("");
   try {
     // statfsSync type field indicates filesystem — btrfs, XFS, or ext4
-    const stats: any = statfsSync(HEARTH_DIR);
-    const fsType: number | undefined = stats.type;
+    const stats = statfsSync(HEARTH_DIR) as unknown as Record<string, unknown>;
+    const fsType = typeof stats.type === "number" ? stats.type : undefined;
     if (fsType === 0x9123683e) {
       console.log("  storage: btrfs — reflink CoW enabled (instant snapshots)");
     } else if (fsType === 0x58465342) {
