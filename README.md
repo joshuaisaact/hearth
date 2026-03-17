@@ -251,6 +251,33 @@ docs/                   Specs, design docs, references
 
 See [docs/exec-plans/](docs/exec-plans/) for detailed execution plans.
 
+## Running Claude Code in a Sandbox
+
+The primary use case — run an AI agent with full autonomy in a safe, isolated environment:
+
+```typescript
+const sandbox = await Sandbox.create();
+await sandbox.enableInternet();
+
+// Install Claude Code and copy credentials
+await sandbox.exec("npm install -g @anthropic-ai/claude-code");
+await sandbox.exec("useradd -m -s /bin/bash agent");
+// ... copy ~/.claude/.credentials.json into sandbox
+
+// Run with --dangerously-skip-permissions — it's safe, it's in a VM
+const proc = sandbox.spawn(
+  'su - agent -c \'claude -p "Build a REST API" --dangerously-skip-permissions\'',
+);
+proc.stdout.on("data", console.log);
+await proc.wait();
+
+// Pull the results out
+await sandbox.download("/workspace", "./output");
+await sandbox.destroy();
+```
+
+See [examples/claude-in-sandbox.ts](examples/claude-in-sandbox.ts) for a complete working example.
+
 ## License
 
 MIT
