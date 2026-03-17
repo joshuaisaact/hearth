@@ -3,10 +3,26 @@ import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { Sandbox } from "../sandbox/sandbox.js";
 import { getHearthDir } from "../vm/binary.js";
-import { errorMessage, encodeMessage, parseFrames } from "../util.js";
+import { errorMessage, encodeMessage, parseFrames, requireStr, requireNum } from "../util.js";
 import type { SpawnHandle } from "../agent/client.js";
+import type { ExecOptions, SpawnOptions } from "../sandbox/types.js";
 
 const DAEMON_SOCK = process.env.HEARTH_DAEMON_SOCK ?? join(getHearthDir(), "daemon.sock");
+
+/** Incoming daemon request — discriminated by method. */
+interface DaemonRequest {
+  reqId: number;
+  method: string;
+  sandboxId?: string;
+  name?: string;
+  command?: string;
+  opts?: ExecOptions | SpawnOptions;
+  path?: string;
+  content?: string;
+  hostPath?: string;
+  guestPath?: string;
+  guestPort?: number;
+}
 
 interface ActiveSandbox {
   sandbox: Sandbox;
@@ -43,13 +59,14 @@ export function startDaemon(): net.Server {
 
       for (const json of messages) {
         processing = processing.then(async () => {
+          let reqId: number | undefined;
           try {
-            const msg = JSON.parse(json);
-            const reqId = msg.reqId;
+            const msg = JSON.parse(json) as DaemonRequest;
+            reqId = msg.reqId;
             const response = await handleMessage(msg, sandboxes, () => nextId++, () => nextSpawnId++, conn);
             sendResponse(conn, { ...response, reqId });
           } catch (err) {
-            sendResponse(conn, { error: errorMessage(err) });
+            sendResponse(conn, { error: errorMessage(err), reqId });
           }
         });
       }
@@ -69,15 +86,13 @@ export function startDaemon(): net.Server {
 }
 
 async function handleMessage(
-  msg: any,
+  msg: DaemonRequest,
   sandboxes: Map<string, ActiveSandbox>,
   allocId: () => number,
   allocSpawnId: () => number,
   conn: net.Socket,
 ): Promise<object> {
-  const { method } = msg;
-
-  switch (method) {
+  switch (msg.method) {
     case "create": {
       const sandbox = await Sandbox.create();
       const sandboxId = `sb_${allocId()}`;
@@ -86,21 +101,21 @@ async function handleMessage(
     }
 
     case "fromSnapshot": {
-      const sandbox = await Sandbox.fromSnapshot(msg.name);
+      const sandbox = await Sandbox.fromSnapshot(requireStr(msg.name, "name"));
       const sandboxId = `sb_${allocId()}`;
       sandboxes.set(sandboxId, { sandbox, spawns: new Map() });
       return { ok: true, sandboxId };
     }
 
     case "exec": {
-      const active = getSandbox(sandboxes, msg.sandboxId);
-      const result = await active.sandbox.exec(msg.command, msg.opts);
+      const active = getSandbox(sandboxes, requireStr(msg.sandboxId, "sandboxId"));
+      const result = await active.sandbox.exec(requireStr(msg.command, "command"), msg.opts);
       return { ok: true, ...result };
     }
 
     case "spawn": {
-      const active = getSandbox(sandboxes, msg.sandboxId);
-      const handle = active.sandbox.spawn(msg.command, msg.opts);
+      const active = getSandbox(sandboxes, requireStr(msg.sandboxId, "sandboxId"));
+      const handle = active.sandbox.spawn(requireStr(msg.command, "command"), msg.opts);
       const spawnId = allocSpawnId();
       active.spawns.set(spawnId, handle);
 
@@ -119,52 +134,54 @@ async function handleMessage(
     }
 
     case "writeFile": {
-      const active = getSandbox(sandboxes, msg.sandboxId);
-      await active.sandbox.writeFile(msg.path, msg.content);
+      const active = getSandbox(sandboxes, requireStr(msg.sandboxId, "sandboxId"));
+      await active.sandbox.writeFile(requireStr(msg.path, "path"), requireStr(msg.content, "content"));
       return { ok: true };
     }
 
     case "readFile": {
-      const active = getSandbox(sandboxes, msg.sandboxId);
-      const content = await active.sandbox.readFile(msg.path);
+      const active = getSandbox(sandboxes, requireStr(msg.sandboxId, "sandboxId"));
+      const content = await active.sandbox.readFile(requireStr(msg.path, "path"));
       return { ok: true, content };
     }
 
     case "upload": {
-      const active = getSandbox(sandboxes, msg.sandboxId);
-      await active.sandbox.upload(msg.hostPath, msg.guestPath);
+      const active = getSandbox(sandboxes, requireStr(msg.sandboxId, "sandboxId"));
+      await active.sandbox.upload(requireStr(msg.hostPath, "hostPath"), requireStr(msg.guestPath, "guestPath"));
       return { ok: true };
     }
 
     case "download": {
-      const active = getSandbox(sandboxes, msg.sandboxId);
-      await active.sandbox.download(msg.guestPath, msg.hostPath);
+      const active = getSandbox(sandboxes, requireStr(msg.sandboxId, "sandboxId"));
+      await active.sandbox.download(requireStr(msg.guestPath, "guestPath"), requireStr(msg.hostPath, "hostPath"));
       return { ok: true };
     }
 
     case "forwardPort": {
-      const active = getSandbox(sandboxes, msg.sandboxId);
-      const { host, port } = await active.sandbox.forwardPort(msg.guestPort);
+      const active = getSandbox(sandboxes, requireStr(msg.sandboxId, "sandboxId"));
+      const { host, port } = await active.sandbox.forwardPort(requireNum(msg.guestPort, "guestPort"));
       return { ok: true, host, port };
     }
 
     case "enableInternet": {
-      const active = getSandbox(sandboxes, msg.sandboxId);
+      const active = getSandbox(sandboxes, requireStr(msg.sandboxId, "sandboxId"));
       await active.sandbox.enableInternet();
       return { ok: true };
     }
 
     case "snapshot": {
-      const active = getSandbox(sandboxes, msg.sandboxId);
-      const name = await active.sandbox.snapshot(msg.name);
-      sandboxes.delete(msg.sandboxId);
+      const sid = requireStr(msg.sandboxId, "sandboxId");
+      const active = getSandbox(sandboxes, sid);
+      const name = await active.sandbox.snapshot(requireStr(msg.name, "name"));
+      sandboxes.delete(sid);
       return { ok: true, name };
     }
 
     case "destroy": {
-      const active = getSandbox(sandboxes, msg.sandboxId);
+      const sid = requireStr(msg.sandboxId, "sandboxId");
+      const active = getSandbox(sandboxes, sid);
       await active.sandbox.destroy();
-      sandboxes.delete(msg.sandboxId);
+      sandboxes.delete(sid);
       return { ok: true };
     }
 
@@ -174,7 +191,7 @@ async function handleMessage(
     }
 
     case "deleteSnapshot": {
-      Sandbox.deleteSnapshot(msg.name);
+      Sandbox.deleteSnapshot(requireStr(msg.name, "name"));
       return { ok: true };
     }
 
@@ -183,7 +200,7 @@ async function handleMessage(
     }
 
     default:
-      return { error: `unknown method: ${method}` };
+      return { error: `unknown method: ${msg.method}` };
   }
 }
 

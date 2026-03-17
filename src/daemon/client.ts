@@ -12,10 +12,29 @@ const DEFAULT_SOCKET = join(homedir(), ".hearth", "daemon.sock");
  * Client for the Hearth daemon. Provides the same API as the Sandbox class
  * but proxies all operations through a Unix socket to the daemon process.
  */
+/** A parsed JSON response from the daemon. */
+interface DaemonResponse {
+  reqId?: number;
+  ok?: boolean;
+  error?: string;
+  sandboxId?: string;
+  spawnId?: number;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+  content?: string;
+  host?: string;
+  port?: number;
+  name?: string;
+  snapshots?: SnapshotInfo[];
+  event?: string;
+  data?: string;
+}
+
 export class DaemonClient {
   private conn: net.Socket | null = null;
   private pending = new Map<number, {
-    resolve: (value: any) => void;
+    resolve: (value: DaemonResponse) => void;
     reject: (err: Error) => void;
   }>();
   private spawnListeners = new Map<number, {
@@ -52,13 +71,13 @@ export class DaemonClient {
 
       for (const json of result.messages) {
         try {
-          this.handleResponse(JSON.parse(json));
+          this.handleResponse(JSON.parse(json) as DaemonResponse);
         } catch {}
       }
     });
   }
 
-  private handleResponse(msg: any): void {
+  private handleResponse(msg: DaemonResponse): void {
     // Spawn stream events
     if (msg.event && msg.spawnId !== undefined) {
       const listener = this.spawnListeners.get(msg.spawnId);
@@ -69,8 +88,8 @@ export class DaemonClient {
       } else if (msg.event === "stderr") {
         listener.stderr.emit("data", msg.data);
       } else if (msg.event === "exit") {
-        listener.exitResolve({ exitCode: msg.exitCode });
-        this.spawnListeners.delete(msg.spawnId);
+        listener.exitResolve({ exitCode: msg.exitCode ?? 1 });
+        this.spawnListeners.delete(msg.spawnId!);
       }
       return;
     }
@@ -89,7 +108,7 @@ export class DaemonClient {
     }
   }
 
-  private request(msg: object): Promise<any> {
+  private request(msg: object): Promise<DaemonResponse> {
     return new Promise((resolve, reject) => {
       if (!this.conn) {
         reject(new Error("Not connected to daemon"));
@@ -103,16 +122,16 @@ export class DaemonClient {
 
   async create(): Promise<RemoteSandbox> {
     const resp = await this.request({ method: "create" });
-    return new RemoteSandbox(this, resp.sandboxId);
+    return new RemoteSandbox(this, resp.sandboxId!);
   }
 
   async fromSnapshot(name: string): Promise<RemoteSandbox> {
     const resp = await this.request({ method: "fromSnapshot", name });
-    return new RemoteSandbox(this, resp.sandboxId);
+    return new RemoteSandbox(this, resp.sandboxId!);
   }
 
   listSnapshots(): Promise<SnapshotInfo[]> {
-    return this.request({ method: "listSnapshots" }).then((r) => r.snapshots);
+    return this.request({ method: "listSnapshots" }).then((r) => r.snapshots ?? []);
   }
 
   async deleteSnapshot(name: string): Promise<void> {
@@ -122,9 +141,9 @@ export class DaemonClient {
   /** @internal Called by RemoteSandbox */
   _exec(sandboxId: string, command: string, opts?: ExecOptions): Promise<ExecResult> {
     return this.request({ method: "exec", sandboxId, command, opts }).then((r) => ({
-      stdout: r.stdout,
-      stderr: r.stderr,
-      exitCode: r.exitCode,
+      stdout: r.stdout ?? "",
+      stderr: r.stderr ?? "",
+      exitCode: r.exitCode ?? 1,
     }));
   }
 
@@ -138,7 +157,7 @@ export class DaemonClient {
     });
 
     this.request({ method: "spawn", sandboxId, command, opts }).then((r) => {
-      this.spawnListeners.set(r.spawnId, { stdout, stderr, exitResolve: exitResolve! });
+      this.spawnListeners.set(r.spawnId!, { stdout, stderr, exitResolve: exitResolve! });
     });
 
     return {
@@ -157,7 +176,7 @@ export class DaemonClient {
 
   /** @internal */
   _readFile(sandboxId: string, path: string): Promise<string> {
-    return this.request({ method: "readFile", sandboxId, path }).then((r) => r.content);
+    return this.request({ method: "readFile", sandboxId, path }).then((r) => r.content ?? "");
   }
 
   /** @internal */
@@ -173,8 +192,8 @@ export class DaemonClient {
   /** @internal */
   _forwardPort(sandboxId: string, guestPort: number): Promise<{ host: string; port: number }> {
     return this.request({ method: "forwardPort", sandboxId, guestPort }).then((r) => ({
-      host: r.host,
-      port: r.port,
+      host: r.host ?? "127.0.0.1",
+      port: r.port ?? 0,
     }));
   }
 
@@ -185,7 +204,7 @@ export class DaemonClient {
 
   /** @internal */
   _snapshot(sandboxId: string, name: string): Promise<string> {
-    return this.request({ method: "snapshot", sandboxId, name }).then((r) => r.name);
+    return this.request({ method: "snapshot", sandboxId, name }).then((r) => r.name ?? name);
   }
 
   /** @internal */
