@@ -152,6 +152,23 @@ describe.skipIf(!hasKvm)("Sandbox", () => {
     expect(exitCode).toBe(42);
   }, 30000);
 
+  it("should access the internet after enableInternet()", async () => {
+    sandbox = await Sandbox.create();
+    await sandbox.enableInternet();
+
+    const result = await sandbox.exec("curl -sS https://httpbin.org/ip", { timeout: 15000 });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("origin");
+  }, 30000);
+
+  it("should not have internet without enableInternet()", async () => {
+    sandbox = await Sandbox.create();
+
+    // curl without proxy should fail (no network)
+    const result = await sandbox.exec("curl -sS --max-time 3 https://httpbin.org/ip 2>&1 || true", { timeout: 10000 });
+    expect(result.stdout).not.toContain("origin");
+  }, 30000);
+
   it("should snapshot and restore a configured sandbox", async () => {
     // Create and configure
     sandbox = await Sandbox.create();

@@ -19,6 +19,7 @@ import {
   VSOCK_NAME,
   SOCKET_NAME,
 } from "../vm/snapshot.js";
+import { startProxy } from "../network/proxy.js";
 import { VmBootError } from "../errors.js";
 import { waitForFile, errorMessage } from "../util.js";
 import type { SpawnHandle } from "../agent/client.js";
@@ -43,6 +44,8 @@ export class Sandbox {
   private runDir: string;
   private vsockPath: string;
   private portForwardServers: net.Server[] = [];
+  private proxyServer: net.Server | null = null;
+  private internetEnabled = false;
   private destroyed = false;
 
   private constructor(
@@ -217,13 +220,41 @@ export class Sandbox {
 
   async exec(command: string, opts?: ExecOptions): Promise<ExecResult> {
     this.ensureAlive();
-    return this.agent.exec(wrapCommand(command, opts), { timeout: opts?.timeout });
+    return this.agent.exec(wrapCommand(command, this.mergeProxyEnv(opts)), { timeout: opts?.timeout });
   }
 
   /** Spawn a long-running command with streaming stdout/stderr. */
   spawn(command: string, opts?: SpawnOptions): SpawnHandle {
     this.ensureAlive();
-    return this.agent.spawn(wrapCommand(command, opts), { timeout: opts?.timeout });
+    return this.agent.spawn(wrapCommand(command, this.mergeProxyEnv(opts)), { timeout: opts?.timeout });
+  }
+
+  /**
+   * Enable internet access inside the sandbox.
+   * Starts an HTTP CONNECT proxy on the host, tunneled over vsock.
+   * All exec/spawn calls will automatically have HTTP_PROXY set.
+   */
+  async enableInternet(): Promise<void> {
+    this.ensureAlive();
+    if (this.internetEnabled) return;
+
+    this.proxyServer = await startProxy(join(this.runDir, VSOCK_NAME));
+    this.internetEnabled = true;
+  }
+
+  private mergeProxyEnv(opts?: ExecOptions): ExecOptions | undefined {
+    if (!this.internetEnabled) return opts;
+    const proxyUrl = "http://127.0.0.1:3128";
+    const proxyEnv = {
+      HTTP_PROXY: proxyUrl,
+      HTTPS_PROXY: proxyUrl,
+      http_proxy: proxyUrl,
+      https_proxy: proxyUrl,
+    };
+    return {
+      ...opts,
+      env: { ...proxyEnv, ...opts?.env },
+    };
   }
 
   async writeFile(path: string, content: string | Buffer): Promise<void> {
@@ -321,6 +352,9 @@ export class Sandbox {
     activeSandboxes.delete(this);
     for (const s of this.portForwardServers) {
       try { s.close(); } catch {}
+    }
+    if (this.proxyServer) {
+      try { this.proxyServer.close(); } catch {}
     }
     try { this.agent.close(); } catch {}
     try { this.process.kill("SIGKILL"); } catch {}

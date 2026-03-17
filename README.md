@@ -90,6 +90,19 @@ Read a file from the sandbox.
 const content = await sandbox.readFile("/etc/hostname");
 ```
 
+### `sandbox.enableInternet()`
+
+Enable internet access inside the sandbox. Tunnels HTTP/HTTPS traffic over vsock — no root, no TAP devices.
+
+```typescript
+await sandbox.enableInternet();
+await sandbox.exec("npm install");     // works
+await sandbox.exec("curl https://example.com");  // works
+await sandbox.exec("git clone https://github.com/user/repo");  // works
+```
+
+All `exec()` and `spawn()` calls automatically get `HTTP_PROXY`/`HTTPS_PROXY` set after this.
+
 ### `sandbox.spawn(command, opts?)`
 
 Run a long-running command with streaming stdout/stderr. Unlike `exec()`, output arrives as it's produced.
@@ -198,7 +211,7 @@ docs/                   Specs, design docs, references
 
 **v0.1**: Working `create → exec → destroy` loop with snapshot restore.
 
-**v0.2 (current)**: `npx hearth setup` CLI, vsock port forwarding, tar-based upload/download, user-facing snapshots, streaming exec. 22 tests passing.
+**v0.2 (current)**: `npx hearth setup` CLI, vsock port forwarding, tar-based upload/download, user-facing snapshots, streaming exec, internet access via HTTPS proxy. 24 tests passing.
 
 **v0.3**: Observability (Victoria Logs/Metrics, `sandbox.logs.query()`, `sandbox.observe()`), streaming exec, daemon backend.
 

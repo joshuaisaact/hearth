@@ -8,4 +8,5 @@
 | [Firecracker Integration](firecracker-integration.md) | Draft | How we interface with Firecracker |
 | [Guest Agent Protocol](guest-agent-protocol.md) | Draft | vsock-based control plane |
 | [Snapshot Architecture](snapshot-architecture.md) | Partial | CoW snapshots and fast clone |
+| [Networking](networking.md) | Implementing | Internet via HTTPS proxy over vsock. No root needed |
 | [Observability](observability.md) | Partial | Logs + metrics via Zig agent → Victoria. OTel traces deferred |

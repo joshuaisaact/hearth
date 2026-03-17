@@ -60,12 +60,12 @@ fn recvMsg(fd: linux.fd_t, buf: []u8) ![]u8 {
     return buf[0..len];
 }
 
-fn connectVsock() !linux.fd_t {
+fn connectVsock(port: u32) !linux.fd_t {
     const sock_rc: isize = @bitCast(linux.socket(AF_VSOCK, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0));
     if (sock_rc < 0) return error.SocketFailed;
     const fd: linux.fd_t = @intCast(sock_rc);
 
-    const addr = SockaddrVm{ .port = AGENT_PORT, .cid = VSOCK_CID_HOST };
+    const addr = SockaddrVm{ .port = port, .cid = VSOCK_CID_HOST };
     const connect_rc: isize = @bitCast(linux.connect(fd, @ptrCast(&addr), @sizeOf(SockaddrVm)));
     if (connect_rc < 0) {
         _ = linux.close(fd);
@@ -79,7 +79,7 @@ fn connectVsock() !linux.fd_t {
 fn connectWithRetry() !linux.fd_t {
     var attempts: u32 = 0;
     while (attempts < 50) : (attempts += 1) {
-        return connectVsock() catch {
+        return connectVsock(AGENT_PORT) catch {
             const ts = linux.timespec{ .sec = 0, .nsec = 100_000_000 }; // 100ms
             _ = linux.nanosleep(&ts, null);
             continue;
@@ -416,6 +416,8 @@ fn handleReadFile(path: []const u8, resp_buf: []u8) []const u8 {
 
 const FORWARD_PORT: u32 = 1025;
 const TRANSFER_PORT: u32 = 1026;
+const PROXY_VSOCK_PORT: u32 = 1027;
+const PROXY_TCP_PORT: u16 = 3128;
 
 // Shared helpers for vsock listeners
 
@@ -499,40 +501,16 @@ fn listenVsock(port: u32) !linux.fd_t {
     return fd;
 }
 
-var forward_relay_buf: [64 * 1024]u8 = undefined;
-
 fn handleForwardConn(vsock_fd: linux.fd_t) void {
     const header = readLine(vsock_fd, &line_buf) orelse return;
     const port = jsonU32(header, "port");
     if (port == 0) return;
 
-    // Connect to guest localhost:port
     const tcp_fd = tcpConnect(port);
     if (tcp_fd < 0) return;
     defer _ = linux.close(tcp_fd);
 
-    // Bidirectional relay: vsock ↔ TCP
-    var pfds = [2]linux.pollfd{
-        .{ .fd = vsock_fd, .events = linux.POLL.IN, .revents = 0 },
-        .{ .fd = tcp_fd, .events = linux.POLL.IN, .revents = 0 },
-    };
-
-    while (true) {
-        const poll_rc: isize = @bitCast(linux.poll(@ptrCast(&pfds), 2, 300_000));
-        if (poll_rc <= 0) break;
-
-        if (pfds[0].revents & (linux.POLL.IN | linux.POLL.HUP) != 0) {
-            const n: isize = @bitCast(linux.read(vsock_fd, &forward_relay_buf, forward_relay_buf.len));
-            if (n <= 0) break;
-            writeAll(tcp_fd, forward_relay_buf[0..@intCast(n)]) catch break;
-        }
-
-        if (pfds[1].revents & (linux.POLL.IN | linux.POLL.HUP) != 0) {
-            const n: isize = @bitCast(linux.read(tcp_fd, &forward_relay_buf, forward_relay_buf.len));
-            if (n <= 0) break;
-            writeAll(vsock_fd, forward_relay_buf[0..@intCast(n)]) catch break;
-        }
-    }
+    proxyRelay(vsock_fd, tcp_fd);
 }
 
 fn tcpConnect(port: u32) linux.fd_t {
@@ -553,6 +531,105 @@ fn tcpConnect(port: u32) linux.fd_t {
         return -1;
     }
     return fd;
+}
+
+// HTTP proxy bridge: TCP 127.0.0.1:3128 → vsock port 1027.
+// Allows guest processes to use HTTP_PROXY for internet access.
+// Each TCP connection is relayed to the host-side CONNECT proxy via vsock.
+fn startProxyBridge() void {
+    const fork_rc: isize = @bitCast(linux.fork());
+    if (fork_rc != 0) return;
+
+    // Listen on TCP 127.0.0.1:3128
+    const listen_fd = tcpListen(PROXY_TCP_PORT) catch linux.exit_group(1);
+
+    while (true) {
+        const accept_rc: isize = @bitCast(linux.accept4(listen_fd, null, null, linux.SOCK.CLOEXEC));
+        if (accept_rc < 0) continue;
+        const tcp_fd: linux.fd_t = @intCast(accept_rc);
+
+        const child_rc: isize = @bitCast(linux.fork());
+        if (child_rc < 0) {
+            _ = linux.close(tcp_fd);
+            continue;
+        }
+        if (child_rc > 0) {
+            _ = linux.close(tcp_fd);
+            var dummy: u32 = 0;
+            while (true) {
+                const w: isize = @bitCast(linux.waitpid(-1, &dummy, 1));
+                if (w <= 0) break;
+            }
+            continue;
+        }
+
+        // Child: connect to host via vsock and relay
+        _ = linux.close(listen_fd);
+        const vsock_fd = connectVsock(PROXY_VSOCK_PORT) catch {
+            _ = linux.close(tcp_fd);
+            linux.exit_group(1);
+        };
+        proxyRelay(tcp_fd, vsock_fd);
+        _ = linux.close(tcp_fd);
+        _ = linux.close(vsock_fd);
+        linux.exit_group(0);
+    }
+}
+
+fn tcpListen(port: u16) !linux.fd_t {
+    const sock_rc: isize = @bitCast(linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0));
+    if (sock_rc < 0) return error.SocketFailed;
+    const fd: linux.fd_t = @intCast(sock_rc);
+
+    var one: u32 = 1;
+    _ = linux.setsockopt(fd, 1, 2, @ptrCast(&one), @sizeOf(u32)); // SO_REUSEADDR
+
+    var addr: linux.sockaddr.in = .{
+        .family = linux.AF.INET,
+        .port = @byteSwap(port),
+        .addr = @byteSwap(@as(u32, 0x7f000001)), // 127.0.0.1
+        .zero = .{0} ** 8,
+    };
+
+    const bind_rc: isize = @bitCast(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in)));
+    if (bind_rc < 0) {
+        _ = linux.close(fd);
+        return error.BindFailed;
+    }
+
+    const listen_rc: isize = @bitCast(linux.listen(fd, 16));
+    if (listen_rc < 0) {
+        _ = linux.close(fd);
+        return error.ListenFailed;
+    }
+
+    return fd;
+}
+
+var proxy_buf: [64 * 1024]u8 = undefined;
+
+fn proxyRelay(fd_a: linux.fd_t, fd_b: linux.fd_t) void {
+    var pfds = [2]linux.pollfd{
+        .{ .fd = fd_a, .events = linux.POLL.IN, .revents = 0 },
+        .{ .fd = fd_b, .events = linux.POLL.IN, .revents = 0 },
+    };
+
+    while (true) {
+        const poll_rc: isize = @bitCast(linux.poll(@ptrCast(&pfds), 2, 300_000));
+        if (poll_rc <= 0) break;
+
+        if (pfds[0].revents & (linux.POLL.IN | linux.POLL.HUP) != 0) {
+            const n: isize = @bitCast(linux.read(fd_a, &proxy_buf, proxy_buf.len));
+            if (n <= 0) break;
+            writeAll(fd_b, proxy_buf[0..@intCast(n)]) catch break;
+        }
+
+        if (pfds[1].revents & (linux.POLL.IN | linux.POLL.HUP) != 0) {
+            const n: isize = @bitCast(linux.read(fd_b, &proxy_buf, proxy_buf.len));
+            if (n <= 0) break;
+            writeAll(fd_a, proxy_buf[0..@intCast(n)]) catch break;
+        }
+    }
 }
 
 fn handleTransferConn(vsock_fd: linux.fd_t) void {
@@ -697,6 +774,7 @@ pub fn main() !void {
         // must restart them every time the control channel reconnects.
         startListener(FORWARD_PORT, handleForwardConn);
         startListener(TRANSFER_PORT, handleTransferConn);
+        startProxyBridge();
 
         // Inner command loop
         while (true) {
