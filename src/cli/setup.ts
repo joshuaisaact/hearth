@@ -12,7 +12,7 @@ import {
   statfsSync,
 } from "node:fs";
 import { join } from "node:path";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import { arch, tmpdir } from "node:os";
 import { download, fetchText } from "./download.js";
 import { getHearthDir } from "../vm/binary.js";
@@ -252,19 +252,17 @@ async function setupRootfs() {
     execSync("docker build -t hearth-rootfs .", { cwd: tmpDir, stdio: "pipe" });
 
     console.log("  rootfs: exporting container...");
-    const cid = execSync("docker create hearth-rootfs", { stdio: "pipe" })
+    const cid = execFileSync("docker", ["create", "hearth-rootfs"], { stdio: "pipe" })
       .toString()
       .trim();
-    execSync(`docker export ${cid} > rootfs.tar`, {
-      cwd: tmpDir,
+    execFileSync("docker", ["export", "-o", join(tmpDir, "rootfs.tar"), cid], {
       stdio: "pipe",
-      shell: "/bin/sh",
     });
-    execSync(`docker rm ${cid}`, { stdio: "pipe" });
+    execFileSync("docker", ["rm", cid], { stdio: "pipe" });
 
     const extractDir = join(tmpDir, "rootfs");
     mkdirSync(extractDir, { recursive: true });
-    execSync("tar xf rootfs.tar -C rootfs", { cwd: tmpDir, stdio: "pipe" });
+    execFileSync("tar", ["xf", join(tmpDir, "rootfs.tar"), "-C", extractDir], { stdio: "pipe" });
 
     // Minimal init that mounts essential filesystems and starts the agent
     writeFileSync(
@@ -288,8 +286,8 @@ async function setupRootfs() {
     );
 
     console.log("  rootfs: creating ext4 image...");
-    execSync(`truncate -s 2G "${rootfsPath}"`, { stdio: "pipe" });
-    execSync(`mkfs.ext4 -F -q -d "${extractDir}" "${rootfsPath}"`, {
+    execFileSync("truncate", ["-s", "2G", rootfsPath], { stdio: "pipe" });
+    execFileSync("mkfs.ext4", ["-F", "-q", "-d", extractDir, rootfsPath], {
       stdio: "pipe",
     });
 

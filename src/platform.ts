@@ -1,7 +1,6 @@
-import { platform, homedir } from "node:os";
-import { existsSync, readFileSync } from "node:fs";
-import { execSync, execFileSync } from "node:child_process";
-import { join } from "node:path";
+import { platform } from "node:os";
+import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 
 export type Platform = "linux" | "macos" | "wsl";
 
