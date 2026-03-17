@@ -1,8 +1,12 @@
 import net from "node:net";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import { EventEmitter } from "node:events";
 import { encodeMessage, parseFrames } from "../util.js";
 import type { ExecResult, ExecOptions, SpawnOptions, SnapshotInfo } from "../sandbox/types.js";
 import type { SpawnHandle } from "../agent/client.js";
+
+const DEFAULT_SOCKET = join(homedir(), ".hearth", "daemon.sock");
 
 /**
  * Client for the Hearth daemon. Provides the same API as the Sandbox class
@@ -21,9 +25,16 @@ export class DaemonClient {
   }>();
   private nextReqId = 1;
 
-  async connect(socketPath: string): Promise<void> {
+  /**
+   * Connect to the daemon. Accepts a Unix socket path (default: ~/.hearth/daemon.sock)
+   * or a TCP address like "localhost:8787".
+   */
+  async connect(address?: string): Promise<void> {
+    const addr = address ?? DEFAULT_SOCKET;
     return new Promise((resolve, reject) => {
-      const conn = net.connect({ path: socketPath });
+      const conn = addr.includes(":")
+        ? net.connect({ host: addr.split(":")[0], port: parseInt(addr.split(":")[1], 10) })
+        : net.connect({ path: addr });
       conn.once("connect", () => {
         this.conn = conn;
         this.startReading();

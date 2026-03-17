@@ -7,6 +7,7 @@
 | [SDK API Design](sdk-api-design.md) | Draft | Public TypeScript API surface |
 | [Sandbox Lifecycle](sandbox-lifecycle.md) | Draft | Create → use → snapshot → destroy |
 | [Filesystem Operations](filesystem-operations.md) | Draft | File I/O between host and guest |
+| [Lima macOS Support](lima-macos-support.md) | Draft | CLI automation for macOS M3+ via Lima |
 
 ## Future
 

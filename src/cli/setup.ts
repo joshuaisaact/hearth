@@ -13,10 +13,11 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
-import { arch } from "node:os";
+import { arch, tmpdir } from "node:os";
 import { download, fetchText } from "./download.js";
 import { getHearthDir } from "../vm/binary.js";
 import { errorMessage } from "../util.js";
+import { getPlatform } from "../platform.js";
 
 const HEARTH_DIR = getHearthDir();
 const BIN_DIR = join(HEARTH_DIR, "bin");
@@ -30,8 +31,23 @@ function fcArch(): string {
   throw new Error(`Unsupported architecture: ${a}`);
 }
 
+const AGENT_VERSION = "agent-v0.1.0";
+const GITHUB_REPO = "joshuaisaact/hearth";
+
 async function main() {
   console.log("hearth setup\n");
+
+  const plat = getPlatform();
+  if (plat === "macos") {
+    console.error("ERROR: hearth setup must run on Linux (it needs /dev/kvm).");
+    console.error("");
+    console.error("  On macOS with M3+ chip, use Lima:");
+    console.error("    npx hearth lima setup");
+    console.error("");
+    console.error("  On M1/M2, use a remote daemon:");
+    console.error("    See docs/design-docs/platform-support.md");
+    process.exit(1);
+  }
 
   checkKvm();
 
@@ -137,15 +153,32 @@ async function setupKernel() {
 async function setupAgent() {
   const agentPath = join(BIN_DIR, "hearth-agent");
   if (existsSync(agentPath)) {
-    console.log("  hearth-agent: already built");
+    console.log("  hearth-agent: already installed");
     return;
   }
 
+  // Try downloading prebuilt binary first
+  const architecture = fcArch();
+  const assetName = `hearth-agent-${architecture}-linux`;
+  const url = `https://github.com/${GITHUB_REPO}/releases/download/${AGENT_VERSION}/${assetName}`;
+
+  try {
+    console.log(`  hearth-agent: downloading prebuilt (${architecture})...`);
+    await download(url, agentPath);
+    chmodSync(agentPath, 0o755);
+    console.log("  hearth-agent: installed");
+    return;
+  } catch {
+    console.log("  hearth-agent: prebuilt download failed, trying Zig build...");
+  }
+
+  // Fallback: build from source with Zig
   try {
     execSync("zig version", { stdio: "pipe" });
   } catch {
-    console.error("ERROR: Zig not found on PATH. The guest agent requires Zig to build.");
-    console.error("  Install Zig: https://ziglang.org/download/");
+    console.error("ERROR: Could not download prebuilt agent and Zig not found on PATH.");
+    console.error("  Either create a GitHub release with agent binaries,");
+    console.error("  or install Zig: https://ziglang.org/download/");
     process.exit(1);
   }
 
@@ -190,7 +223,8 @@ async function setupRootfs() {
 
   console.log("  rootfs: building via Docker...");
 
-  const tmpDir = join(HEARTH_DIR, "tmp-rootfs-build");
+  // Use system temp dir (not HEARTH_DIR) to avoid virtiofs issues when running inside Lima.
+  const tmpDir = join(tmpdir(), "hearth-rootfs-build");
   mkdirSync(tmpDir, { recursive: true });
 
   try {
