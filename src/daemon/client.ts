@@ -25,16 +25,9 @@ export class DaemonClient {
   }>();
   private nextReqId = 1;
 
-  /**
-   * Connect to the daemon. Accepts a Unix socket path (default: ~/.hearth/daemon.sock)
-   * or a TCP address like "localhost:8787".
-   */
-  async connect(address?: string): Promise<void> {
-    const addr = address ?? DEFAULT_SOCKET;
+  async connect(socketPath: string = DEFAULT_SOCKET): Promise<void> {
     return new Promise((resolve, reject) => {
-      const conn = addr.includes(":")
-        ? net.connect({ host: addr.split(":")[0], port: parseInt(addr.split(":")[1], 10) })
-        : net.connect({ path: addr });
+      const conn = net.connect({ path: socketPath });
       conn.once("connect", () => {
         this.conn = conn;
         this.startReading();

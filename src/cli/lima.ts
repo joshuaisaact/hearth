@@ -19,7 +19,7 @@ const DEFAULT_CPUS = 4;
 const DEFAULT_MEMORY = "4GiB";
 const DEFAULT_DISK = "50GiB";
 const DAEMON_LOG = "/tmp/hearth-daemon.log";
-const DAEMON_PORT = 8787;
+const DAEMON_GUEST_SOCK = "/run/hearth/daemon.sock";
 
 export async function limaCommand(args: string[]): Promise<void> {
   const subcommand = args[0];
@@ -148,6 +148,10 @@ mounts:
   - location: "~"
     writable: true
 
+portForwards:
+  - guestSocket: "${DAEMON_GUEST_SOCK}"
+    hostSocket: "{{.Home}}/.hearth/daemon.sock"
+
 provision:
   - mode: system
     script: |
@@ -231,14 +235,15 @@ async function limaSetup(opts: SetupOpts): Promise<void> {
     console.log("\n  Starting daemon...");
     startDaemonInLima();
 
-    // Verify daemon is accessible via TCP (Lima auto-forwards the port)
-    await waitForDaemon(DAEMON_PORT, 10000);
-    console.log(`    ✓ Daemon listening on localhost:${DAEMON_PORT}`);
+    // Verify daemon is accessible via Lima's socket forwarding
+    const hostSock = daemonHostSocket();
+    await waitForDaemon(hostSock, 10000);
+    console.log("    ✓ Daemon listening on ~/.hearth/daemon.sock");
 
     console.log("\n  Setup complete. From macOS, use DaemonClient:\n");
     console.log('    import { DaemonClient } from "hearth";');
     console.log("    const client = new DaemonClient();");
-    console.log(`    await client.connect("localhost:${DAEMON_PORT}");`);
+    console.log("    await client.connect();");
     console.log("    const sandbox = await client.create();");
     console.log('    const result = await sandbox.exec("echo hello from a microVM");');
   } finally {
@@ -256,7 +261,13 @@ async function limaStart(): Promise<void> {
     process.exit(1);
   }
 
+  const wasStarted = status === "running";
+
   if (status === "stopped") {
+    // Remove stale socket from previous session
+    const hostSock = daemonHostSocket();
+    try { unlinkSync(hostSock); } catch {}
+
     console.log("  Starting Lima VM...");
     limactlSync(["start", INSTANCE_NAME]);
     console.log("  ✓ VM running");
@@ -264,16 +275,17 @@ async function limaStart(): Promise<void> {
     console.log("  Lima VM already running");
   }
 
-  // Check if daemon is already running
-  if (await isDaemonResponsive(DAEMON_PORT)) {
+  // If the VM was already running, check if daemon is responsive
+  const hostSock = daemonHostSocket();
+  if (wasStarted && await isDaemonResponsive(hostSock)) {
     console.log("  Daemon already running");
     return;
   }
 
   console.log("  Starting daemon...");
   startDaemonInLima();
-  await waitForDaemon(DAEMON_PORT, 10000);
-  console.log(`  ✓ Daemon listening on localhost:${DAEMON_PORT}`);
+  await waitForDaemon(hostSock, 10000);
+  console.log("  ✓ Daemon listening on ~/.hearth/daemon.sock");
 }
 
 function limaStop(): void {
@@ -317,9 +329,9 @@ async function limaStatus(): Promise<void> {
   console.log(`Lima VM:  ${info.status}${details}`);
 
   if (info.status === "running") {
-    const responsive = await isDaemonResponsive(DAEMON_PORT);
+    const responsive = await isDaemonResponsive(daemonHostSocket());
     console.log(`Daemon:   ${responsive ? "running" : "not running"}`);
-    console.log(`Address:  localhost:${DAEMON_PORT}`);
+    console.log("Socket:   ~/.hearth/daemon.sock");
   }
 }
 
@@ -392,7 +404,6 @@ function limaHearthDir(): string {
 
 function startDaemonInLima(): void {
   const hearthRoot = findHearthRoot();
-  const hearthDir = limaHearthDir();
 
   // Fix /dev/kvm permissions — udev resets to 660 on each boot
   try {
@@ -400,20 +411,34 @@ function startDaemonInLima(): void {
       "sudo", "chmod", "666", "/dev/kvm"], { stdio: "pipe" });
   } catch {}
 
-  // Unix sockets don't work across the virtiofs boundary.
-  // Use TCP — Lima auto-forwards guest ports to the host.
-  // Set HEARTH_DIR so the daemon uses the shared mount, not the Linux homedir.
+  // Create socket directory and ensure daemon socket dir exists
+  try {
+    execFileSync("limactl", ["shell", INSTANCE_NAME, "--",
+      "sudo", "mkdir", "-p", "/run/hearth"], { stdio: "pipe" });
+    execFileSync("limactl", ["shell", INSTANCE_NAME, "--",
+      "sudo", "chmod", "777", "/run/hearth"], { stdio: "pipe" });
+  } catch {}
+
+  // Daemon listens on a Unix socket inside the guest.
+  // Lima's portForwards config forwards it to ~/.hearth/daemon.sock on macOS.
+  // Set HEARTH_DIR so the daemon finds Firecracker/kernel/rootfs on the shared mount.
+  const hearthDir = limaHearthDir();
   nodeSpawn(
     "limactl",
     ["shell", INSTANCE_NAME, "--", "bash", "-c",
-      `cd '${shellEscape(hearthRoot)}' && HEARTH_DIR='${shellEscape(hearthDir)}' nohup node dist/cli/hearth.js daemon --port ${DAEMON_PORT} > ${DAEMON_LOG} 2>&1 &`,
+      `cd '${shellEscape(hearthRoot)}' && HEARTH_DIR='${shellEscape(hearthDir)}' HEARTH_DAEMON_SOCK=${DAEMON_GUEST_SOCK} nohup node dist/cli/hearth.js daemon > ${DAEMON_LOG} 2>&1 &`,
     ],
     { stdio: "ignore", detached: true },
   ).unref();
 }
 
-/** Wait for the daemon TCP port to be responsive. */
-function waitForDaemon(port: number, timeoutMs: number): Promise<void> {
+/** The macOS-side socket path, forwarded from the guest by Lima. */
+function daemonHostSocket(): string {
+  return join(homedir(), ".hearth", "daemon.sock");
+}
+
+/** Wait for the daemon socket to be responsive. */
+function waitForDaemon(socketPath: string, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const start = Date.now();
     const check = () => {
@@ -423,11 +448,16 @@ function waitForDaemon(port: number, timeoutMs: number): Promise<void> {
           const log = limaExec(INSTANCE_NAME, `tail -20 ${DAEMON_LOG}`);
           if (log.trim()) logHint = `\nDaemon log:\n${log}`;
         } catch {}
-        reject(new Error(`Timed out waiting for daemon on port ${port}${logHint}`));
+        reject(new Error(`Timed out waiting for daemon socket: ${socketPath}${logHint}`));
         return;
       }
 
-      const conn = net.connect({ host: "127.0.0.1", port });
+      if (!existsSync(socketPath)) {
+        setTimeout(check, 500);
+        return;
+      }
+
+      const conn = net.connect({ path: socketPath });
       conn.once("connect", () => {
         conn.destroy();
         resolve();
@@ -441,10 +471,11 @@ function waitForDaemon(port: number, timeoutMs: number): Promise<void> {
   });
 }
 
-/** Check if the daemon is listening on the given TCP port. */
-function isDaemonResponsive(port: number): Promise<boolean> {
+/** Check if the daemon is listening on the given socket. */
+function isDaemonResponsive(socketPath: string): Promise<boolean> {
+  if (!existsSync(socketPath)) return Promise.resolve(false);
   return new Promise((resolve) => {
-    const conn = net.connect({ host: "127.0.0.1", port });
+    const conn = net.connect({ path: socketPath });
     const timeout = setTimeout(() => {
       conn.destroy();
       resolve(false);

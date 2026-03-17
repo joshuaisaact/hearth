@@ -5,11 +5,19 @@
 
 ## What we discovered
 
-### 1. Unix sockets don't cross the virtiofs boundary
+### 1. Unix sockets don't cross the virtiofs boundary — use Lima's portForwards
 
-Lima mounts macOS `~` into the guest via virtiofs. Socket files created by a Linux process inside the VM are visible as files from macOS (`ls` shows them), but `net.connect()` from macOS gets `ECONNREFUSED`. The kernel can't route Unix domain socket connections across the VM boundary.
+Lima mounts macOS `~` into the guest via virtiofs. Socket files created by a Linux process inside the VM are visible as files from macOS (`ls` shows them), but `net.connect()` from macOS gets `ECONNREFUSED`. The kernel can't route Unix domain socket connections across the VM boundary — this is a fundamental limitation of virtiofs/sshfs ([lima-vm/lima#648](https://github.com/lima-vm/lima/issues/648)).
 
-**Fix**: Use TCP instead. The daemon listens on `0.0.0.0:8787` inside Lima, and Lima's automatic port forwarding makes it accessible at `localhost:8787` from macOS. `DaemonClient.connect("localhost:8787")`.
+**Fix**: Lima has built-in socket forwarding via `portForwards` in the lima.yaml config. The daemon listens on `/run/hearth/daemon.sock` inside the guest, and Lima forwards it to `~/.hearth/daemon.sock` on macOS via SSH tunneling:
+
+```yaml
+portForwards:
+  - guestSocket: "/run/hearth/daemon.sock"
+    hostSocket: "{{.Home}}/.hearth/daemon.sock"
+```
+
+This means `DaemonClient.connect()` just works with the default socket path — no TCP, no special addresses. The same API on both Linux and macOS.
 
 ### 2. Lima homedir != macOS homedir
 
@@ -51,9 +59,9 @@ The GitHub release was created with tag `agent-v0.1.0` but the download URL in `
 
 ## Architecture decisions made
 
-- **TCP over Unix sockets for Lima**: The daemon supports both `net.Server.listen(path)` and `net.Server.listen(port, host)` via the `ListenTarget` type. The CLI accepts `--port` to select TCP mode.
+- **Lima portForwards for socket sharing**: The daemon stays on a Unix socket everywhere. Lima's built-in `portForwards` config forwards the guest socket to the host via SSH tunneling. No TCP, no extra transport code.
 - **HEARTH_DIR env var**: Simple, composable, works everywhere. No Lima-specific code paths in the core — just a different env var.
-- **Port 8787**: Arbitrary but memorable. Could be made configurable later.
+- **HEARTH_DAEMON_SOCK env var**: Inside Lima, the daemon listens at `/run/hearth/daemon.sock` (not under `~/.hearth`) because Lima forwards it to the host. The env var overrides the default.
 - **sudo for setup, user for daemon**: Setup needs root (docker, KVM). Daemon runs as the regular user after KVM permissions are fixed.
 
 ## What works end-to-end
@@ -66,7 +74,7 @@ macOS M4 Pro
   └─ hearth lima status      # shows VM state, daemon state
   └─ hearth lima teardown    # destroys VM entirely
 
-  └─ DaemonClient.connect("localhost:8787")
+  └─ DaemonClient.connect()  # connects via ~/.hearth/daemon.sock (Lima forwards it)
      └─ client.create()      # creates Firecracker microVM inside Lima
      └─ sandbox.exec(...)    # runs commands inside the microVM
      └─ sandbox.destroy()    # tears down the microVM
