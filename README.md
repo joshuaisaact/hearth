@@ -35,50 +35,65 @@ Cloud sandboxes (E2B, Daytona, Modal) add latency, cost, and a dependency on som
 
 ## Requirements
 
-- `/dev/kvm` access (Linux kernel with KVM support)
 - Node.js 20+
 - Docker (for building the rootfs)
-- Zig (for building the guest agent)
 
 ### Platform Support
 
-**Linux** — native. Works out of the box on any Linux with KVM.
-
-**Windows (WSL2)** — works natively. WSL2 includes a real Linux kernel with `/dev/kvm` support. Install WSL2 and run everything inside it:
+**Linux** — native. Works out of the box on any Linux with `/dev/kvm`.
 
 ```bash
-wsl --install                  # one-time
-wsl                            # enter Linux environment
-# Everything below runs inside WSL2 — /dev/kvm is available
 npx hearth setup
 ```
 
-No additional configuration needed. WSL2 has supported KVM since 2022.
+**Windows (WSL2)** — works natively. WSL2 has a real Linux kernel with KVM support:
 
-**macOS (M3+ with macOS 15+)** — via Lima. Requires nested virtualization, which Apple only supports on M3 and newer chips:
+```bash
+wsl --install && wsl            # one-time
+npx hearth setup
+```
+
+**macOS (M3+ with macOS 15+)** — automated via Lima. One command:
 
 ```bash
 brew install lima
-limactl create --name hearth --set '.nestedVirtualization=true' template://default
-limactl start hearth
-limactl shell hearth            # enter Linux environment
-npx hearth setup                # Firecracker runs inside the Lima VM
-hearth daemon                   # start daemon, accessible from macOS via shared mount
+npx hearth lima setup           # creates Lima VM, provisions, installs everything
 ```
 
-**macOS (M1/M2)** — use a remote Linux host. M1/M2 Macs cannot do nested virtualization. Options:
+Then use `DaemonClient` from macOS:
+
+```typescript
+import { DaemonClient } from "hearth";
+
+const client = new DaemonClient();
+await client.connect();                     // connects via ~/.hearth/daemon.sock
+const sandbox = await client.create();      // same API as Sandbox
+```
+
+Daily workflow: `hearth lima start` / `hearth lima stop` / `hearth lima status`.
+
+**macOS (M1/M2)** — use a remote Linux host. M1/M2 Macs cannot do nested virtualization:
 - Connect to a Linux server running `hearth daemon` (Hetzner bare metal from ~$35/mo)
-- Use the `DaemonClient` from the SDK to connect over SSH tunnel
+- Use `DaemonClient` to connect over SSH tunnel
 
 ## Setup
 
-Requires Docker and Zig on PATH.
+**Linux / WSL2:**
 
 ```bash
 npx hearth setup
 ```
 
-This downloads Firecracker v1.15.0, the guest kernel, builds the Zig agent, creates an Ubuntu rootfs via Docker, and captures a base snapshot. Takes ~1-2 minutes on first run, idempotent on subsequent runs.
+Downloads Firecracker v1.15.0, guest kernel, prebuilt agent binary, builds an Ubuntu rootfs via Docker, and captures a base snapshot. Takes ~1-2 minutes on first run, idempotent after that.
+
+**macOS M3+:**
+
+```bash
+brew install lima
+npx hearth lima setup
+```
+
+Creates a Lima VM with nested KVM, provisions it, runs `hearth setup` inside. Takes ~3-5 minutes on first run.
 
 ## API
 
@@ -225,58 +240,81 @@ src/                    TypeScript SDK
   agent/client.ts       Host-side vsock agent client (control channel)
   daemon/server.ts      Daemon for macOS/multi-process (hearth daemon)
   daemon/client.ts      DaemonClient + RemoteSandbox (same API as Sandbox)
+  claude.ts             ClaudeSandbox helper (pre-installed Claude Code + runtime auth)
+  platform.ts           Platform detection (macOS chip, Lima status)
   network/proxy.ts      HTTP CONNECT proxy for internet access over vsock
   vm/api.ts             Firecracker REST API client
   vm/snapshot.ts        Base snapshot creation and management
   vm/binary.ts          Binary/image path resolution
   cli/setup.ts          `npx hearth setup` — downloads and configures everything
+  cli/lima.ts           `hearth lima` — Lima VM lifecycle for macOS
   cli/download.ts       HTTP download with progress and redirect handling
   errors.ts             Typed error hierarchy
   util.ts               Shared utilities (encodeMessage, parseFrames, etc.)
 
 agent/                  Zig guest agent (runs inside VM)
   src/main.zig          vsock control server, exec, file I/O, port forward relay
-  build.zig             Cross-compile for x86_64-linux
+  build.zig             Cross-compile for x86_64-linux and aarch64-linux
+
+examples/               Working examples
+  claude-in-sandbox.ts  Run Claude Code in a sandbox
+  create-claude-snapshot.ts  Build the reusable claude-base snapshot
 
 docs/                   Specs, design docs, references
 ```
+
+## Running Claude Code in a Sandbox
+
+The primary use case — run an AI agent with full autonomy in a safe, isolated environment. `--dangerously-skip-permissions` is actually safe because the sandbox *is* the permission boundary.
+
+### Quick start
+
+1. Create the `claude-base` snapshot (one-time, ~2 minutes):
+
+```bash
+# Generate an OAuth token (valid for 1 year)
+claude setup-token
+# Save it to .env
+echo "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-..." > .env
+
+# Build the snapshot
+node --experimental-strip-types examples/create-claude-snapshot.ts --daemon  # macOS
+node --experimental-strip-types examples/create-claude-snapshot.ts           # Linux
+```
+
+2. Use `ClaudeSandbox` to run prompts:
+
+```typescript
+import { DaemonClient, ClaudeSandbox, CLAUDE_SNAPSHOT_NAME } from "hearth";
+
+const client = new DaemonClient();
+await client.connect();
+const sandbox = await client.fromSnapshot(CLAUDE_SNAPSHOT_NAME);
+await sandbox.enableInternet();
+
+const claude = ClaudeSandbox.create(sandbox);
+
+const result = await claude.prompt("Build a REST API with Express");
+console.log(result.stdout);
+
+// Pull the results out
+await sandbox.download("/home/agent", "./output");
+await claude.destroy();
+```
+
+The `claude-base` snapshot has Claude Code pre-installed but no credentials — the OAuth token is passed at runtime via `CLAUDE_CODE_OAUTH_TOKEN`. The snapshot is shareable.
+
+See [examples/claude-in-sandbox.ts](examples/claude-in-sandbox.ts) for a complete working example.
 
 ## Roadmap
 
 **v0.1**: Working `create → exec → destroy` loop with snapshot restore.
 
-**v0.2 (current)**: `npx hearth setup` CLI, vsock port forwarding, tar-based upload/download, user-facing snapshots, streaming exec, internet access via HTTPS proxy, daemon server/client. 28 tests passing.
+**v0.2**: `npx hearth setup` CLI, vsock port forwarding, tar-based upload/download, user-facing snapshots, streaming exec, internet access via HTTPS proxy, daemon server/client.
 
-**v0.3**: macOS support via Lima, observability (Victoria Logs/Metrics), npm publish.
+**v0.3 (current)**: macOS Lima support (done), prebuilt agent binaries (done), observability, npm publish.
 
 See [docs/exec-plans/](docs/exec-plans/) for detailed execution plans.
-
-## Running Claude Code in a Sandbox
-
-The primary use case — run an AI agent with full autonomy in a safe, isolated environment:
-
-```typescript
-const sandbox = await Sandbox.create();
-await sandbox.enableInternet();
-
-// Install Claude Code and copy credentials
-await sandbox.exec("npm install -g @anthropic-ai/claude-code");
-await sandbox.exec("useradd -m -s /bin/bash agent");
-// ... copy ~/.claude/.credentials.json into sandbox
-
-// Run with --dangerously-skip-permissions — it's safe, it's in a VM
-const proc = sandbox.spawn(
-  'su - agent -c \'claude -p "Build a REST API" --dangerously-skip-permissions\'',
-);
-proc.stdout.on("data", console.log);
-await proc.wait();
-
-// Pull the results out
-await sandbox.download("/workspace", "./output");
-await sandbox.destroy();
-```
-
-See [examples/claude-in-sandbox.ts](examples/claude-in-sandbox.ts) for a complete working example.
 
 ## License
 
