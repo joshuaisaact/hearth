@@ -416,12 +416,11 @@ function startDaemonInLima(): void {
       "sudo", "chmod", "666", "/dev/kvm"], { stdio: "pipe" });
   } catch {}
 
-  // Create socket directory and ensure daemon socket dir exists
+  // Create socket directory owned by the session user
   try {
     execFileSync("limactl", ["shell", INSTANCE_NAME, "--",
-      "sudo", "mkdir", "-p", "/run/hearth"], { stdio: "pipe" });
-    execFileSync("limactl", ["shell", INSTANCE_NAME, "--",
-      "sudo", "chmod", "777", "/run/hearth"], { stdio: "pipe" });
+      "sudo", "bash", "-c", "mkdir -p /run/hearth && chown $(id -u):$(id -g) /run/hearth && chmod 700 /run/hearth"],
+      { stdio: "pipe" });
   } catch {}
 
   // Daemon listens on a Unix socket inside the guest.
