@@ -179,10 +179,12 @@ Host                                      Guest (Firecracker microVM)
 │ sandbox.upload()     │  forward (1025) │ - port forwarding    │
 │ sandbox.download()   │  transfer(1026) │ - tar streaming      │
 │ sandbox.forwardPort()│◄──── vsock ─────│ - reconnect on       │
-│ sandbox.destroy()    │                 │   snapshot restore   │
+│ sandbox.destroy()    │   proxy (1027)  │   snapshot restore   │
+│                      │                 │ - HTTP proxy bridge  │
 │ Firecracker API      │                 │                      │
 │ Snapshot manager     │                 │ Linux kernel 6.1     │
 │ Process lifecycle    │                 │ Ubuntu 24.04 rootfs  │
+│ (or Daemon client)   │                 │ Node.js 22           │
 └──────────────────────┘                 └──────────────────────┘
 ```
 
@@ -190,15 +192,18 @@ Host                                      Guest (Firecracker microVM)
 
 ```
 src/                    TypeScript SDK
-  sandbox/sandbox.ts    Sandbox class (create, exec, forwardPort, destroy)
+  sandbox/sandbox.ts    Sandbox class (create, exec, spawn, snapshot, forwardPort, etc.)
   agent/client.ts       Host-side vsock agent client (control channel)
+  daemon/server.ts      Daemon for macOS/multi-process (hearth daemon)
+  daemon/client.ts      DaemonClient + RemoteSandbox (same API as Sandbox)
+  network/proxy.ts      HTTP CONNECT proxy for internet access over vsock
   vm/api.ts             Firecracker REST API client
   vm/snapshot.ts        Base snapshot creation and management
   vm/binary.ts          Binary/image path resolution
   cli/setup.ts          `npx hearth setup` — downloads and configures everything
   cli/download.ts       HTTP download with progress and redirect handling
   errors.ts             Typed error hierarchy
-  util.ts               Shared utilities
+  util.ts               Shared utilities (encodeMessage, parseFrames, etc.)
 
 agent/                  Zig guest agent (runs inside VM)
   src/main.zig          vsock control server, exec, file I/O, port forward relay
@@ -211,9 +216,9 @@ docs/                   Specs, design docs, references
 
 **v0.1**: Working `create → exec → destroy` loop with snapshot restore.
 
-**v0.2 (current)**: `npx hearth setup` CLI, vsock port forwarding, tar-based upload/download, user-facing snapshots, streaming exec, internet access via HTTPS proxy. 24 tests passing.
+**v0.2 (current)**: `npx hearth setup` CLI, vsock port forwarding, tar-based upload/download, user-facing snapshots, streaming exec, internet access via HTTPS proxy, daemon server/client. 28 tests passing.
 
-**v0.3**: Observability (Victoria Logs/Metrics, `sandbox.logs.query()`, `sandbox.observe()`), streaming exec, daemon backend.
+**v0.3**: macOS support via Lima, observability (Victoria Logs/Metrics), npm publish.
 
 See [docs/exec-plans/](docs/exec-plans/) for detailed execution plans.
 
