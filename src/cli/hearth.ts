@@ -4,10 +4,17 @@ const command = process.argv[2];
 
 if (command === "setup") {
   await import("./setup.js");
+} else if (command === "daemon") {
+  const { startDaemon, DAEMON_SOCK } = await import("../daemon/server.js");
+  const server = startDaemon();
+  console.log(`hearth daemon listening on ${DAEMON_SOCK}`);
+  process.on("SIGINT", () => { server.close(); process.exit(0); });
+  process.on("SIGTERM", () => { server.close(); process.exit(0); });
 } else {
   console.log("Usage: hearth <command>");
   console.log("");
   console.log("Commands:");
   console.log("  setup    Download and configure all dependencies");
+  console.log("  daemon   Start the Hearth daemon (for macOS/multi-process)");
   process.exit(command ? 1 : 0);
 }

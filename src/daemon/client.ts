@@ -1,0 +1,262 @@
+import net from "node:net";
+import { EventEmitter } from "node:events";
+import type { ExecResult, ExecOptions, SpawnOptions, SnapshotInfo } from "../sandbox/types.js";
+import type { SpawnHandle } from "../agent/client.js";
+
+/**
+ * Client for the Hearth daemon. Provides the same API as the Sandbox class
+ * but proxies all operations through a Unix socket to the daemon process.
+ * Used on macOS (via Lima) or for multi-process sandbox access.
+ */
+export class DaemonClient {
+  private conn: net.Socket | null = null;
+  private pending = new Map<number, {
+    resolve: (value: any) => void;
+    reject: (err: Error) => void;
+  }>();
+  private spawnListeners = new Map<number, {
+    stdout: EventEmitter;
+    stderr: EventEmitter;
+    exitResolve: (result: { exitCode: number }) => void;
+  }>();
+  private nextReqId = 1;
+
+  async connect(socketPath: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const conn = net.connect({ path: socketPath });
+      conn.once("connect", () => {
+        this.conn = conn;
+        this.startReading();
+        resolve();
+      });
+      conn.once("error", reject);
+    });
+  }
+
+  private startReading(): void {
+    if (!this.conn) return;
+
+    const chunks: Buffer[] = [];
+    let totalLen = 0;
+
+    this.conn.on("data", (chunk: Buffer) => {
+      chunks.push(chunk);
+      totalLen += chunk.length;
+
+      const buf = Buffer.concat(chunks);
+      chunks.length = 0;
+
+      let offset = 0;
+      while (offset + 4 <= buf.length) {
+        const msgLen = buf.readUInt32LE(offset);
+        if (offset + 4 + msgLen > buf.length) break;
+
+        const json = buf.subarray(offset + 4, offset + 4 + msgLen).toString("utf-8");
+        offset += 4 + msgLen;
+
+        const msg = JSON.parse(json);
+        this.handleResponse(msg);
+      }
+
+      if (offset < buf.length) {
+        chunks.push(buf.subarray(offset));
+        totalLen = buf.length - offset;
+      } else {
+        totalLen = 0;
+      }
+    });
+  }
+
+  private handleResponse(msg: any): void {
+    // Spawn stream events don't have a reqId
+    if (msg.event && msg.spawnId !== undefined) {
+      const listener = this.spawnListeners.get(msg.spawnId);
+      if (!listener) return;
+
+      if (msg.event === "stdout") {
+        listener.stdout.emit("data", msg.data);
+      } else if (msg.event === "stderr") {
+        listener.stderr.emit("data", msg.data);
+      } else if (msg.event === "exit") {
+        listener.exitResolve({ exitCode: msg.exitCode });
+        this.spawnListeners.delete(msg.spawnId);
+      }
+      return;
+    }
+
+    // Regular request/response — resolve the first pending request
+    // (In a production implementation, each request would have an ID
+    //  for correlation. For now, FIFO ordering works because we await
+    //  each request before sending the next.)
+    const [reqId, handler] = this.pending.entries().next().value ?? [];
+    if (reqId !== undefined && handler) {
+      this.pending.delete(reqId);
+      if (msg.error) {
+        handler.reject(new Error(msg.error));
+      } else {
+        handler.resolve(msg);
+      }
+    }
+  }
+
+  private request(msg: object): Promise<any> {
+    return new Promise((resolve, reject) => {
+      if (!this.conn) {
+        reject(new Error("Not connected to daemon"));
+        return;
+      }
+      const reqId = this.nextReqId++;
+      this.pending.set(reqId, { resolve, reject });
+
+      const json = JSON.stringify(msg);
+      const buf = Buffer.alloc(4 + json.length);
+      buf.writeUInt32LE(json.length, 0);
+      buf.write(json, 4);
+      this.conn.write(buf);
+    });
+  }
+
+  async create(): Promise<RemoteSandbox> {
+    const resp = await this.request({ method: "create" });
+    return new RemoteSandbox(this, resp.sandboxId);
+  }
+
+  async fromSnapshot(name: string): Promise<RemoteSandbox> {
+    const resp = await this.request({ method: "fromSnapshot", name });
+    return new RemoteSandbox(this, resp.sandboxId);
+  }
+
+  listSnapshots(): Promise<SnapshotInfo[]> {
+    return this.request({ method: "listSnapshots" }).then((r) => r.snapshots);
+  }
+
+  async deleteSnapshot(name: string): Promise<void> {
+    await this.request({ method: "deleteSnapshot", name });
+  }
+
+  // Internal methods called by RemoteSandbox
+  _exec(sandboxId: string, command: string, opts?: ExecOptions): Promise<ExecResult> {
+    return this.request({ method: "exec", sandboxId, command, opts }).then((r) => ({
+      stdout: r.stdout,
+      stderr: r.stderr,
+      exitCode: r.exitCode,
+    }));
+  }
+
+  _spawn(sandboxId: string, command: string, opts?: SpawnOptions): SpawnHandle {
+    const stdout = new EventEmitter();
+    const stderr = new EventEmitter();
+    let exitResolve: (result: { exitCode: number }) => void;
+    const exitPromise = new Promise<{ exitCode: number }>((resolve) => {
+      exitResolve = resolve;
+    });
+
+    this.request({ method: "spawn", sandboxId, command, opts }).then((r) => {
+      this.spawnListeners.set(r.spawnId, { stdout, stderr, exitResolve: exitResolve! });
+    });
+
+    return {
+      stdout,
+      stderr,
+      wait: () => exitPromise,
+      kill: () => {},
+    };
+  }
+
+  _writeFile(sandboxId: string, path: string, content: string | Buffer): Promise<void> {
+    const strContent = Buffer.isBuffer(content) ? content.toString("utf-8") : content;
+    return this.request({ method: "writeFile", sandboxId, path, content: strContent }).then(() => {});
+  }
+
+  _readFile(sandboxId: string, path: string): Promise<string> {
+    return this.request({ method: "readFile", sandboxId, path }).then((r) => r.content);
+  }
+
+  _upload(sandboxId: string, hostPath: string, guestPath: string): Promise<void> {
+    return this.request({ method: "upload", sandboxId, hostPath, guestPath }).then(() => {});
+  }
+
+  _download(sandboxId: string, guestPath: string, hostPath: string): Promise<void> {
+    return this.request({ method: "download", sandboxId, guestPath, hostPath }).then(() => {});
+  }
+
+  _forwardPort(sandboxId: string, guestPort: number): Promise<{ host: string; port: number }> {
+    return this.request({ method: "forwardPort", sandboxId, guestPort }).then((r) => ({
+      host: r.host,
+      port: r.port,
+    }));
+  }
+
+  _enableInternet(sandboxId: string): Promise<void> {
+    return this.request({ method: "enableInternet", sandboxId }).then(() => {});
+  }
+
+  _snapshot(sandboxId: string, name: string): Promise<string> {
+    return this.request({ method: "snapshot", sandboxId, name }).then((r) => r.name);
+  }
+
+  _destroy(sandboxId: string): Promise<void> {
+    return this.request({ method: "destroy", sandboxId }).then(() => {});
+  }
+
+  close(): void {
+    if (this.conn) {
+      this.conn.destroy();
+      this.conn = null;
+    }
+  }
+}
+
+/**
+ * A sandbox handle that proxies all operations through the daemon.
+ * Same interface as Sandbox but all calls go over the Unix socket.
+ */
+export class RemoteSandbox {
+  private client: DaemonClient;
+  private sandboxId: string;
+
+  constructor(client: DaemonClient, sandboxId: string) {
+    this.client = client;
+    this.sandboxId = sandboxId;
+  }
+
+  exec(command: string, opts?: ExecOptions): Promise<ExecResult> {
+    return this.client._exec(this.sandboxId, command, opts);
+  }
+
+  spawn(command: string, opts?: SpawnOptions): SpawnHandle {
+    return this.client._spawn(this.sandboxId, command, opts);
+  }
+
+  writeFile(path: string, content: string | Buffer): Promise<void> {
+    return this.client._writeFile(this.sandboxId, path, content);
+  }
+
+  readFile(path: string): Promise<string> {
+    return this.client._readFile(this.sandboxId, path);
+  }
+
+  upload(hostPath: string, guestPath: string): Promise<void> {
+    return this.client._upload(this.sandboxId, hostPath, guestPath);
+  }
+
+  download(guestPath: string, hostPath: string): Promise<void> {
+    return this.client._download(this.sandboxId, guestPath, hostPath);
+  }
+
+  forwardPort(guestPort: number): Promise<{ host: string; port: number }> {
+    return this.client._forwardPort(this.sandboxId, guestPort);
+  }
+
+  enableInternet(): Promise<void> {
+    return this.client._enableInternet(this.sandboxId);
+  }
+
+  snapshot(name: string): Promise<string> {
+    return this.client._snapshot(this.sandboxId, name);
+  }
+
+  destroy(): Promise<void> {
+    return this.client._destroy(this.sandboxId);
+  }
+}
