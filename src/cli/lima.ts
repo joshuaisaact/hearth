@@ -390,7 +390,7 @@ function findHearthRoot(): string {
   for (const dir of candidates) {
     if (existsSync(join(dir, "package.json"))) {
       // Lima mounts ~ into the guest — paths outside ~ won't be accessible
-      if (!dir.startsWith(home)) {
+      if (dir !== home && !dir.startsWith(home + "/")) {
         throw new Error(
           `Hearth project at ${dir} is outside your home directory. ` +
           `Lima can only access files under ~. Move the project under ${home}.`,
