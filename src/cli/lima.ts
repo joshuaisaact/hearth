@@ -246,8 +246,8 @@ async function limaSetup(opts: SetupOpts): Promise<void> {
     console.log("\n  Starting daemon...");
     startDaemonInLima();
 
-    // Verify daemon is accessible via Lima's socket forwarding
-        await waitForDaemon(DAEMON_PORT, 10000);
+    // Verify daemon is accessible via Lima TCP port forwarding
+    await waitForDaemon(DAEMON_PORT, 10000);
     console.log(`    ✓ Daemon listening on tcp://127.0.0.1:${DAEMON_PORT}`);
 
     console.log("\n  Setup complete. From macOS, use DaemonClient:\n");

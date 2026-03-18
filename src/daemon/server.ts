@@ -94,7 +94,7 @@ function handleConnection(conn: net.Socket): void {
   });
 
   conn.on("close", () => {
-    for (const [id, active] of sandboxes) {
+    for (const [, active] of sandboxes) {
       try { active.sandbox.destroySync(); } catch {}
     }
     sandboxes.clear();

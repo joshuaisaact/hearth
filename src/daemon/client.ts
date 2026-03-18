@@ -64,7 +64,11 @@ export class DaemonClient {
     if (envUrl) {
       if (envUrl.startsWith("tcp://")) {
         const [host, portStr] = envUrl.slice(6).split(":");
-        return this.connectTo({ host, port: parseInt(portStr, 10) });
+        const port = parseInt(portStr, 10);
+        if (!host || isNaN(port) || port < 1 || port > 65535) {
+          throw new Error(`Invalid HEARTH_DAEMON_URL: ${envUrl} (expected tcp://host:port)`);
+        }
+        return this.connectTo({ host, port });
       }
       if (envUrl.startsWith("unix://")) {
         return this.connectTo(envUrl.slice(7));
