@@ -57,6 +57,18 @@ The original design only mounted `~/.hearth` into the VM. But `hearth setup` and
 
 The GitHub release was created with tag `agent-v0.1.0` but the download URL in `setup.ts` used `v0.1.0`. The `AGENT_VERSION` constant needed to include the `agent-` prefix.
 
+### 7. Lima provisioning modes
+
+Lima supports `mode: system` (runs once at creation) and `mode: boot` (runs on every boot via cloud-init bootcmd). The boot script is the right place for permissions that get reset on reboot — `/dev/kvm` and `/run/hearth`.
+
+The `LIMA_CIDATA_USER` and `LIMA_CIDATA_UID` variables are available by sourcing `/mnt/lima-cidata/lima.env` inside provisioning scripts. Don't use `getent passwd 1000` — Lima maps the macOS UID (e.g. 501) into the guest.
+
+### 8. Firecracker block device support
+
+Firecracker's drive layer uses standard `open()` — it accepts regular files, block devices, and follows symlinks. No path validation or restrictions beyond what the kernel enforces. This means `/dev/mapper/...` paths from dm-thin work as drive paths.
+
+However: the Jailer (Firecracker's security isolation) does more restrictive path handling. Since Hearth doesn't use the Jailer, this isn't a concern.
+
 ## Architecture decisions made
 
 - **Lima portForwards for socket sharing**: The daemon stays on a Unix socket everywhere. Lima's built-in `portForwards` config forwards the guest socket to the host via SSH tunneling. No TCP, no extra transport code.
