@@ -155,23 +155,19 @@ portForwards:
 
 provision:
   - mode: boot
-script: |
+    script: |
       #!/bin/bash
-      # Fix /dev/kvm permissions (VZ creates it as 0660 root:kvm on each boot)
       [ -e /dev/kvm ] && chmod 666 /dev/kvm
-      # Ensure daemon socket directory exists with correct ownership
       LIMA_USER=$(grep LIMA_CIDATA_USER= /mnt/lima-cidata/lima.env | head -1 | cut -d= -f2)
       mkdir -p /run/hearth
       chown "$LIMA_USER:$LIMA_USER" /run/hearth
       chmod 700 /run/hearth
   - mode: system
-script: |
+    script: |
       #!/bin/bash
       set -eux
-      # Node.js 22
       curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
       apt-get install -y nodejs
-      # Docker (for rootfs build)
       curl -fsSL https://get.docker.com | bash -
       LIMA_USER=$(grep LIMA_CIDATA_USER= /mnt/lima-cidata/lima.env | head -1 | cut -d= -f2)
       usermod -aG docker "$LIMA_USER"
