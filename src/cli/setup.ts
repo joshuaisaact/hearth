@@ -238,7 +238,8 @@ async function setupRootfs() {
       ].join("\n"),
     );
 
-    execSync("docker build -t hearth-rootfs .", { cwd: tmpDir, stdio: "pipe" });
+    const platform = fcArch() === "aarch64" ? "linux/arm64" : "linux/amd64";
+    execSync(`docker build --platform ${platform} -t hearth-rootfs .`, { cwd: tmpDir, stdio: "pipe" });
 
     console.log("  rootfs: exporting container...");
     const cid = execFileSync("docker", ["create", "hearth-rootfs"], { stdio: "pipe" })
@@ -267,6 +268,7 @@ async function setupRootfs() {
         "mount -t tmpfs tmpfs /tmp",
         "mount -t tmpfs tmpfs /run",
         "hostname hearth",
+        "echo '127.0.0.1 localhost hearth' > /etc/hosts",
         "ip link set lo up 2>/dev/null",
         "exec /usr/local/bin/hearth-agent",
         "",

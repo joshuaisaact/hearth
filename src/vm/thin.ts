@@ -45,6 +45,51 @@ export function canUseThinPool(): boolean {
   }
 }
 
+/** Attach loopback devices and create the thin-pool dm target. Detaches loops on failure. */
+function attachPool(dataFile: string, metaFile: string): boolean {
+  let dataLoop = "";
+  let metaLoop = "";
+
+  try {
+    dataLoop = execFileSync("losetup", ["--find", "--show", dataFile], { stdio: "pipe" })
+      .toString().trim();
+    metaLoop = execFileSync("losetup", ["--find", "--show", metaFile], { stdio: "pipe" })
+      .toString().trim();
+
+    const dataSectors = execFileSync("blockdev", ["--getsz", dataLoop], { stdio: "pipe" })
+      .toString().trim();
+
+    execFileSync("dmsetup", [
+      "create", POOL_NAME,
+      "--table", `0 ${dataSectors} thin-pool ${metaLoop} ${dataLoop} 128 0`,
+    ], { stdio: "pipe" });
+
+    return true;
+  } catch {
+    if (dataLoop) try { execFileSync("losetup", ["-d", dataLoop], { stdio: "pipe" }); } catch {}
+    if (metaLoop) try { execFileSync("losetup", ["-d", metaLoop], { stdio: "pipe" }); } catch {}
+    return false;
+  }
+}
+
+/**
+ * Re-activate an existing thin pool after reboot.
+ * The data/meta files persist on disk but loopback devices are ephemeral.
+ * Returns true if the pool was successfully activated.
+ */
+export function activateThinPool(): boolean {
+  if (!canUseThinPool()) return false;
+  if (isThinPoolAvailable()) return true;
+
+  const hearthDir = getHearthDir();
+  const dataFile = join(hearthDir, DATA_FILE);
+  const metaFile = join(hearthDir, META_FILE);
+
+  if (!existsSync(dataFile) || !existsSync(metaFile)) return false;
+
+  return attachPool(dataFile, metaFile);
+}
+
 /** Create the thin pool and import the base rootfs. Returns true on success. */
 export function setupThinPool(rootfsPath: string): boolean {
   if (!canUseThinPool()) return false;
@@ -66,25 +111,13 @@ export function setupThinPool(rootfsPath: string): boolean {
       execFileSync("truncate", ["-s", `${DEFAULT_META_SIZE_MB}M`, metaFile], { stdio: "pipe" });
     }
 
-    // Set up loopback devices
-    const dataLoop = execFileSync("losetup", ["--find", "--show", dataFile], { stdio: "pipe" })
-      .toString().trim();
-    const metaLoop = execFileSync("losetup", ["--find", "--show", metaFile], { stdio: "pipe" })
-      .toString().trim();
+    // Zero first block of metadata (required for fresh thin-pool, conv=notrunc preserves file size)
+    execFileSync("dd", ["if=/dev/zero", `of=${metaFile}`, "bs=4096", "count=1", "conv=notrunc"], { stdio: "pipe" });
 
-    // Get data device size in sectors
-    const dataSectors = execFileSync("blockdev", ["--getsz", dataLoop], { stdio: "pipe" })
-      .toString().trim();
-
-    // Zero the metadata device (required for thin-pool)
-    execFileSync("dd", ["if=/dev/zero", `of=${metaLoop}`, "bs=4096", "count=1"], { stdio: "pipe" });
-
-    // Create thin pool with separate data and metadata devices
-    // Block size 128 sectors (64KB)
-    execFileSync("dmsetup", [
-      "create", POOL_NAME,
-      "--table", `0 ${dataSectors} thin-pool ${metaLoop} ${dataLoop} 128 0`,
-    ], { stdio: "pipe" });
+    // Attach loopback devices and create the pool
+    if (!attachPool(dataFile, metaFile)) {
+      return false;
+    }
 
     // Create base thin volume (ID 0)
     execFileSync("dmsetup", ["message", POOL_NAME, "0", `create_thin ${BASE_VOLUME_ID}`], { stdio: "pipe" });
@@ -118,13 +151,27 @@ export function setupThinPool(rootfsPath: string): boolean {
   }
 }
 
-let nextThinId = 1;
+/** Get the next available thin ID by scanning existing thin devices. */
+function allocateThinId(): number {
+  let maxId = 0;
+  try {
+    const output = execFileSync("dmsetup", ["table", "--target", "thin"], { stdio: "pipe" }).toString();
+    for (const line of output.trim().split("\n")) {
+      // Each line: "devname: 0 <sectors> thin <pool_dev> <thin_id>"
+      const parts = line.split(/\s+/);
+      const id = parseInt(parts[parts.length - 1], 10);
+      if (!isNaN(id) && id > maxId) maxId = id;
+    }
+  } catch {}
+  // Also account for the base volume (ID 0)
+  return Math.max(maxId, BASE_VOLUME_ID) + 1;
+}
 
 /** Create a thin snapshot for a sandbox. Returns the device path, or null if dm-thin unavailable. */
 export function createThinSnapshot(sandboxId: string): string | null {
   if (!isThinPoolAvailable()) return null;
 
-  const thinId = nextThinId++;
+  const thinId = allocateThinId();
   const devName = `${POOL_NAME}-sb-${sandboxId}`;
 
   try {
@@ -155,7 +202,7 @@ export function createThinSnapshot(sandboxId: string): string | null {
 export function createThinSnapshotFrom(sandboxId: string, sourceThinId: number): string | null {
   if (!isThinPoolAvailable()) return null;
 
-  const thinId = nextThinId++;
+  const thinId = allocateThinId();
   const devName = `${POOL_NAME}-sb-${sandboxId}`;
 
   try {
