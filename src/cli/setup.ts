@@ -281,6 +281,7 @@ async function setupRootfs() {
         "mount -t tmpfs tmpfs /tmp",
         "mount -t tmpfs tmpfs /run",
         "hostname hearth",
+        "echo '127.0.0.1 localhost hearth' > /etc/hosts",
         "ip link set lo up 2>/dev/null",
         "exec /usr/local/bin/hearth-agent",
         "",
