@@ -20,6 +20,7 @@ import {
   SOCKET_NAME,
 } from "../vm/snapshot.js";
 import { startProxy } from "../network/proxy.js";
+import { createThinSnapshot, destroyThinSnapshot, isThinPoolAvailable } from "../vm/thin.js";
 import { VmBootError } from "../errors.js";
 import { waitForFile, errorMessage } from "../util.js";
 import type { SpawnHandle } from "../agent/client.js";
@@ -45,7 +46,9 @@ export class Sandbox {
   private api: FirecrackerApi;
   private agent: AgentClient;
   private runDir: string;
+  private sandboxId: string;
   private vsockPath: string;
+  private thinDevice: string | null = null;
   private portForwardServers: net.Server[] = [];
   private proxyServer: net.Server | null = null;
   private internetEnabled = false;
@@ -56,13 +59,17 @@ export class Sandbox {
     api: FirecrackerApi,
     agent: AgentClient,
     runDir: string,
+    sandboxId: string,
     vsockPath: string,
+    thinDevice: string | null,
   ) {
     this.process = proc;
     this.api = api;
     this.agent = agent;
     this.runDir = runDir;
+    this.sandboxId = sandboxId;
     this.vsockPath = vsockPath;
+    this.thinDevice = thinDevice;
     activeSandboxes.add(this);
   }
 
@@ -108,12 +115,30 @@ export class Sandbox {
     const runDir = join(getHearthDir(), "run", id);
     mkdirSync(runDir, { recursive: true });
 
-    const clone = constants.COPYFILE_FICLONE;
-    await Promise.all([
-      copyFile(join(snapshotDir, ROOTFS_NAME), join(runDir, ROOTFS_NAME), clone),
-      copyFile(join(snapshotDir, VMSTATE_NAME), join(runDir, VMSTATE_NAME), clone),
-      copyFile(join(snapshotDir, MEMORY_NAME), join(runDir, MEMORY_NAME), clone),
-    ]);
+    // Try dm-thin for the rootfs (instant CoW), fall back to file copy
+    let thinDevice: string | null = null;
+    if (isThinPoolAvailable()) {
+      thinDevice = createThinSnapshot(id);
+    }
+
+    if (thinDevice) {
+      // Thin snapshot for rootfs — only copy vmstate and memory
+      await Promise.all([
+        copyFile(join(snapshotDir, VMSTATE_NAME), join(runDir, VMSTATE_NAME)),
+        copyFile(join(snapshotDir, MEMORY_NAME), join(runDir, MEMORY_NAME)),
+      ]);
+      // Symlink rootfs to the thin device so Firecracker finds it at the expected path
+      const { symlinkSync } = await import("node:fs");
+      symlinkSync(thinDevice, join(runDir, ROOTFS_NAME));
+    } else {
+      // File copy fallback (reflink on btrfs/XFS)
+      const clone = constants.COPYFILE_FICLONE;
+      await Promise.all([
+        copyFile(join(snapshotDir, ROOTFS_NAME), join(runDir, ROOTFS_NAME), clone),
+        copyFile(join(snapshotDir, VMSTATE_NAME), join(runDir, VMSTATE_NAME), clone),
+        copyFile(join(snapshotDir, MEMORY_NAME), join(runDir, MEMORY_NAME), clone),
+      ]);
+    }
 
     const vsockPath = join(runDir, VSOCK_NAME);
     const agent = new AgentClient(vsockPath);
@@ -136,6 +161,7 @@ export class Sandbox {
 
     const cleanup = () => {
       try { proc.kill("SIGKILL"); } catch {}
+      if (thinDevice) destroyThinSnapshot(id);
       rmSync(runDir, { recursive: true, force: true });
     };
 
@@ -167,7 +193,7 @@ export class Sandbox {
 
     await agent.ping();
 
-    return new Sandbox(proc, api, agent, runDir, vsockPath);
+    return new Sandbox(proc, api, agent, runDir, id, vsockPath, thinDevice);
   }
 
   /**
@@ -362,6 +388,9 @@ export class Sandbox {
     }
     try { this.agent.close(); } catch {}
     try { this.process.kill("SIGKILL"); } catch {}
+    if (this.thinDevice) {
+      try { destroyThinSnapshot(this.sandboxId); } catch {}
+    }
     try { rmSync(this.runDir, { recursive: true, force: true }); } catch {}
   }
 

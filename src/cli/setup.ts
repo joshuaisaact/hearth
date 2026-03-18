@@ -18,6 +18,7 @@ import { download, fetchText } from "./download.js";
 import { getHearthDir } from "../vm/binary.js";
 import { errorMessage } from "../util.js";
 import { getPlatform } from "../platform.js";
+import { setupThinPool as initThinPool, canUseThinPool } from "../vm/thin.js";
 
 const HEARTH_DIR = getHearthDir();
 const BIN_DIR = join(HEARTH_DIR, "bin");
@@ -59,6 +60,7 @@ async function main() {
   // Rootfs depends on agent binary; snapshot depends on rootfs
   await setupRootfs();
   await createBaseSnapshot();
+  await setupThinPool();
 
   reportFilesystem();
 
