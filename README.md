@@ -53,14 +53,18 @@ wsl --install && wsl            # one-time
 npx hearth setup
 ```
 
-**macOS (M3+ with macOS 15+)** — automated via Lima. One command:
+**macOS** — use a remote Linux host. Firecracker requires KVM which is not available on macOS. Connect to a Linux server running `hearth daemon`:
 
 ```bash
-brew install lima
-npx hearth lima setup           # creates Lima VM, provisions, installs everything
+# On your Linux server
+npx hearth setup
+hearth daemon
+
+# From macOS, SSH tunnel the daemon socket
+ssh -L ~/.hearth/daemon.sock:/home/user/.hearth/daemon.sock user@server
 ```
 
-Then use `DaemonClient` from macOS:
+Then use `DaemonClient`:
 
 ```typescript
 import { DaemonClient } from "hearth";
@@ -70,30 +74,15 @@ await client.connect();                     // connects via ~/.hearth/daemon.soc
 const sandbox = await client.create();      // same API as Sandbox
 ```
 
-Daily workflow: `hearth lima start` / `hearth lima stop` / `hearth lima status`.
-
-**macOS (M1/M2)** — use a remote Linux host. M1/M2 Macs cannot do nested virtualization:
-- Connect to a Linux server running `hearth daemon` (Hetzner bare metal from ~$35/mo)
-- Use `DaemonClient` to connect over SSH tunnel
+A Hetzner bare-metal server (~$35/mo) can serve an entire team via the daemon.
 
 ## Setup
-
-**Linux / WSL2:**
 
 ```bash
 npx hearth setup
 ```
 
 Downloads Firecracker v1.15.0, guest kernel, prebuilt agent binary, builds an Ubuntu rootfs via Docker, and captures a base snapshot. Takes ~1-2 minutes on first run, idempotent after that.
-
-**macOS M3+:**
-
-```bash
-brew install lima
-npx hearth lima setup
-```
-
-Creates a Lima VM with nested KVM, provisions it, runs `hearth setup` inside. Takes ~3-5 minutes on first run.
 
 ## Interactive Shell
 
@@ -252,13 +241,11 @@ src/                    TypeScript SDK
   daemon/server.ts      Daemon for macOS/multi-process (hearth daemon)
   daemon/client.ts      DaemonClient + RemoteSandbox (same API as Sandbox)
   claude.ts             ClaudeSandbox helper (pre-installed Claude Code + runtime auth)
-  platform.ts           Platform detection (macOS chip, Lima status)
   network/proxy.ts      HTTP CONNECT proxy for internet access over vsock
   vm/api.ts             Firecracker REST API client
   vm/snapshot.ts        Base snapshot creation and management
   vm/binary.ts          Binary/image path resolution
   cli/setup.ts          `npx hearth setup` — downloads and configures everything
-  cli/lima.ts           `hearth lima` — Lima VM lifecycle for macOS
   cli/download.ts       HTTP download with progress and redirect handling
   errors.ts             Typed error hierarchy
   util.ts               Shared utilities (encodeMessage, parseFrames, etc.)
@@ -323,7 +310,7 @@ See [examples/claude-in-sandbox.ts](examples/claude-in-sandbox.ts) for a complet
 
 **v0.2**: `npx hearth setup` CLI, vsock port forwarding, tar-based upload/download, user-facing snapshots, streaming exec, internet access via HTTPS proxy, daemon server/client.
 
-**v0.3 (current)**: macOS Lima support (done), prebuilt agent binaries (done), observability, npm publish.
+**v0.3 (current)**: Prebuilt agent binaries (done), dm-thin instant snapshots, observability, npm publish.
 
 See [docs/exec-plans/](docs/exec-plans/) for detailed execution plans.
 

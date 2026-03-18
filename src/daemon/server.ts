@@ -1,5 +1,5 @@
 import net from "node:net";
-import { unlinkSync, chmodSync } from "node:fs";
+import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { Sandbox } from "../sandbox/sandbox.js";
 import { getHearthDir } from "../vm/binary.js";
@@ -7,7 +7,7 @@ import { errorMessage, encodeMessage, parseFrames, requireStr, requireNum } from
 import type { SpawnHandle } from "../agent/client.js";
 import type { ExecOptions, SpawnOptions } from "../sandbox/types.js";
 
-const DAEMON_SOCK = process.env.HEARTH_DAEMON_SOCK ?? join(getHearthDir(), "daemon.sock");
+const DAEMON_SOCK = join(getHearthDir(), "daemon.sock");
 
 interface DaemonResponse {
   ok?: boolean;
@@ -105,11 +105,7 @@ export function startDaemon(): net.Server {
     });
   });
 
-  server.listen(DAEMON_SOCK, () => {
-    // Make socket accessible to non-root users (e.g. Lima's SSH-based forwarding).
-    // The socket directory (/run/hearth) is already restricted to mode 700.
-    try { chmodSync(DAEMON_SOCK, 0o777); } catch {}
-  });
+  server.listen(DAEMON_SOCK);
   return server;
 }
 
