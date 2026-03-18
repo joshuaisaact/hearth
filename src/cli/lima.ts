@@ -153,7 +153,19 @@ portForwards:
     hostSocket: "{{.Home}}/.hearth/daemon.sock"
 
 provision:
+  - mode: boot
+    description: "Hearth boot-time setup (runs every boot)"
+    script: |
+      #!/bin/bash
+      # Fix /dev/kvm permissions (VZ creates it as 0660 root:kvm on each boot)
+      [ -e /dev/kvm ] && chmod 666 /dev/kvm
+      # Ensure daemon socket directory exists with correct ownership
+      . /mnt/lima-cidata/lima.env
+      mkdir -p /run/hearth
+      chown "$LIMA_CIDATA_USER:$LIMA_CIDATA_USER" /run/hearth
+      chmod 700 /run/hearth
   - mode: system
+    description: "Hearth one-time provisioning"
     script: |
       #!/bin/bash
       set -eux
@@ -162,11 +174,9 @@ provision:
       apt-get install -y nodejs
       # Docker (for rootfs build)
       curl -fsSL https://get.docker.com | bash -
-      usermod -aG docker "$(getent passwd 1000 | cut -d: -f1)"
-      # KVM access — persistent udev rule so /dev/kvm survives reboots
-      echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' > /etc/udev/rules.d/99-kvm.rules
-      [ -e /dev/kvm ] && chmod 666 /dev/kvm
-      usermod -aG kvm "$(getent passwd 1000 | cut -d: -f1)"
+      . /mnt/lima-cidata/lima.env
+      usermod -aG docker "$LIMA_CIDATA_USER"
+      usermod -aG kvm "$LIMA_CIDATA_USER"
 `;
 }
 
@@ -409,19 +419,6 @@ function limaHearthDir(): string {
 
 function startDaemonInLima(): void {
   const hearthRoot = findHearthRoot();
-
-  // Fix /dev/kvm permissions — udev resets to 660 on each boot
-  try {
-    execFileSync("limactl", ["shell", INSTANCE_NAME, "--",
-      "sudo", "chmod", "666", "/dev/kvm"], { stdio: "pipe" });
-  } catch {}
-
-  // Create socket directory owned by the session user
-  try {
-    execFileSync("limactl", ["shell", INSTANCE_NAME, "--",
-      "sudo", "bash", "-c", "mkdir -p /run/hearth && chown $(id -u):$(id -g) /run/hearth && chmod 700 /run/hearth"],
-      { stdio: "pipe" });
-  } catch {}
 
   // Daemon listens on a Unix socket inside the guest.
   // Lima's portForwards config forwards it to ~/.hearth/daemon.sock on macOS.
