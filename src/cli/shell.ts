@@ -1,6 +1,3 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
 import { Sandbox } from "../sandbox/sandbox.js";
 import { DaemonClient } from "../daemon/client.js";
 import type { SpawnHandle } from "../agent/client.js";
@@ -12,11 +9,10 @@ interface SandboxLike {
 }
 
 async function createSandbox(snapshotName?: string): Promise<{ sandbox: SandboxLike; cleanup: () => void }> {
-  const daemonSock = process.env.HEARTH_DAEMON_SOCK ?? join(homedir(), ".hearth", "daemon.sock");
-
-  if (existsSync(daemonSock)) {
+  // Try daemon first (auto-detects Unix socket on Linux, TCP on macOS)
+  try {
     const client = new DaemonClient();
-    await client.connect(daemonSock);
+    await client.connect();
     const sandbox = snapshotName
       ? await client.fromSnapshot(snapshotName)
       : await client.create();
@@ -28,8 +24,9 @@ async function createSandbox(snapshotName?: string): Promise<{ sandbox: SandboxL
         client.close();
       },
     };
-  }
+  } catch {}
 
+  // Fall back to direct Sandbox (Linux only)
   const sandbox = snapshotName
     ? await Sandbox.fromSnapshot(snapshotName)
     : await Sandbox.create();

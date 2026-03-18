@@ -1,17 +1,17 @@
 import net from "node:net";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { homedir, platform } from "node:os";
+import { existsSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { encodeMessage, parseFrames } from "../util.js";
 import type { ExecResult, ExecOptions, SpawnOptions, SnapshotInfo } from "../sandbox/types.js";
 import type { SpawnHandle } from "../agent/client.js";
 
 const DEFAULT_SOCKET = join(homedir(), ".hearth", "daemon.sock");
+const DEFAULT_PORT = 7117;
 
-/**
- * Client for the Hearth daemon. Provides the same API as the Sandbox class
- * but proxies all operations through a Unix socket to the daemon process.
- */
+/** Connection target: Unix socket path, TCP host:port, or auto-detect. */
+export type DaemonTarget = string | { host: string; port: number };
 /** A parsed JSON response from the daemon. */
 interface DaemonResponse {
   reqId?: number;
@@ -45,10 +45,60 @@ export class DaemonClient {
   private pendingSpawnEvents = new Map<number, DaemonResponse[]>();
   private nextReqId = 1;
 
-  async connect(socketPath: string = DEFAULT_SOCKET): Promise<void> {
+  /**
+   * Connect to the daemon.
+   * - No args: auto-detect (macOS tries TCP first, Linux tries Unix socket first)
+   * - String: Unix socket path
+   * - { host, port }: TCP connection
+   */
+  async connect(target?: DaemonTarget): Promise<void> {
+    if (target === undefined) {
+      return this.autoConnect();
+    }
+    return this.connectTo(target);
+  }
+
+  private async autoConnect(): Promise<void> {
+    // Check env var first
+    const envUrl = process.env.HEARTH_DAEMON_URL;
+    if (envUrl) {
+      if (envUrl.startsWith("tcp://")) {
+        const [host, portStr] = envUrl.slice(6).split(":");
+        return this.connectTo({ host, port: parseInt(portStr, 10) });
+      }
+      if (envUrl.startsWith("unix://")) {
+        return this.connectTo(envUrl.slice(7));
+      }
+      return this.connectTo(envUrl);
+    }
+
+    const isMac = platform() === "darwin";
+
+    if (isMac) {
+      // macOS: try TCP first (Lima port forwarding), fall back to Unix socket
+      try {
+        return await this.connectTo({ host: "127.0.0.1", port: DEFAULT_PORT });
+      } catch {
+        return this.connectTo(DEFAULT_SOCKET);
+      }
+    }
+
+    // Linux/WSL: try Unix socket first, fall back to TCP
+    if (existsSync(DEFAULT_SOCKET)) {
+      try {
+        return await this.connectTo(DEFAULT_SOCKET);
+      } catch {}
+    }
+    return this.connectTo({ host: "127.0.0.1", port: DEFAULT_PORT });
+  }
+
+  private connectTo(target: DaemonTarget): Promise<void> {
     return new Promise((resolve, reject) => {
-      const conn = net.connect({ path: socketPath });
+      const conn = typeof target === "string"
+        ? net.connect({ path: target })
+        : net.connect({ host: target.host, port: target.port });
       conn.once("connect", () => {
+        if (typeof target !== "string") conn.setNoDelay(true);
         this.conn = conn;
         this.startReading();
         resolve();

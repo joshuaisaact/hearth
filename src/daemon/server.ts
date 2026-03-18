@@ -8,6 +8,7 @@ import type { SpawnHandle } from "../agent/client.js";
 import type { ExecOptions, SpawnOptions } from "../sandbox/types.js";
 
 const DAEMON_SOCK = process.env.HEARTH_DAEMON_SOCK ?? join(getHearthDir(), "daemon.sock");
+const DAEMON_PORT = parseInt(process.env.HEARTH_DAEMON_PORT ?? "7117", 10);
 
 interface DaemonResponse {
   ok?: boolean;
@@ -48,69 +49,87 @@ interface ActiveSandbox {
   spawns: Map<number, SpawnHandle>;
 }
 
-export function startDaemon(): net.Server {
-  try { unlinkSync(DAEMON_SOCK); } catch {}
+function handleConnection(conn: net.Socket): void {
+  const sandboxes = new Map<string, ActiveSandbox>();
+  let nextId = 1;
+  let nextSpawnId = 1;
+  const chunks: Buffer[] = [];
+  let totalLen = 0;
 
-  const server = net.createServer((conn) => {
-    const sandboxes = new Map<string, ActiveSandbox>();
-    let nextId = 1;
-    let nextSpawnId = 1;
-    const chunks: Buffer[] = [];
-    let totalLen = 0;
+  // Serial message queue — process one at a time to prevent races
+  let processing = Promise.resolve();
 
-    // Serial message queue — process one at a time to prevent races
-    let processing = Promise.resolve();
+  conn.on("data", (chunk: Buffer) => {
+    chunks.push(chunk);
+    totalLen += chunk.length;
 
-    conn.on("data", (chunk: Buffer) => {
-      chunks.push(chunk);
-      totalLen += chunk.length;
+    const combined = Buffer.concat(chunks);
+    chunks.length = 0;
+    const { messages, remainder } = parseFrames(combined);
 
-      const combined = Buffer.concat(chunks);
-      chunks.length = 0;
-      const { messages, remainder } = parseFrames(combined);
+    if (remainder.length > 0) {
+      chunks.push(remainder);
+      totalLen = remainder.length;
+    } else {
+      totalLen = 0;
+    }
 
-      if (remainder.length > 0) {
-        chunks.push(remainder);
-        totalLen = remainder.length;
-      } else {
-        totalLen = 0;
-      }
-
-      for (const json of messages) {
-        processing = processing.then(async () => {
-          let reqId: number | undefined;
-          try {
-            const msg = JSON.parse(json) as DaemonRequest;
-            reqId = typeof msg.reqId === "number" ? msg.reqId : undefined;
-            const response = await handleMessage(msg, sandboxes, () => nextId++, () => nextSpawnId++, conn);
-            sendResponse(conn, { ...response, reqId });
-          } catch (err) {
-            // Try to extract reqId from raw JSON if parse succeeded but handler threw
-            if (reqId === undefined) {
-              const match = json.match(/"reqId"\s*:\s*(\d+)/);
-              if (match) reqId = parseInt(match[1], 10);
-            }
-            sendResponse(conn, { error: errorMessage(err), reqId });
+    for (const json of messages) {
+      processing = processing.then(async () => {
+        let reqId: number | undefined;
+        try {
+          const msg = JSON.parse(json) as DaemonRequest;
+          reqId = typeof msg.reqId === "number" ? msg.reqId : undefined;
+          const response = await handleMessage(msg, sandboxes, () => nextId++, () => nextSpawnId++, conn);
+          sendResponse(conn, { ...response, reqId });
+        } catch (err) {
+          if (reqId === undefined) {
+            const match = json.match(/"reqId"\s*:\s*(\d+)/);
+            if (match) reqId = parseInt(match[1], 10);
           }
-        });
-      }
-    });
-
-    conn.on("close", () => {
-      // Clean up all sandboxes owned by this connection
-      for (const [id, active] of sandboxes) {
-        try { active.sandbox.destroySync(); } catch {}
-      }
-      sandboxes.clear();
-    });
+          sendResponse(conn, { error: errorMessage(err), reqId });
+        }
+      });
+    }
   });
 
-  server.listen(DAEMON_SOCK, () => {
-    // Make socket accessible to non-root users (e.g. Lima's SSH-based forwarding).
-    // The socket directory (/run/hearth) is already restricted to mode 700.
+  conn.on("close", () => {
+    for (const [id, active] of sandboxes) {
+      try { active.sandbox.destroySync(); } catch {}
+    }
+    sandboxes.clear();
+  });
+}
+
+export interface DaemonServers {
+  unix: net.Server;
+  tcp: net.Server;
+  close(): void;
+}
+
+export function startDaemon(): DaemonServers {
+  // Unix socket listener
+  try { unlinkSync(DAEMON_SOCK); } catch {}
+  const unixServer = net.createServer(handleConnection);
+  unixServer.listen(DAEMON_SOCK, () => {
     try { chmodSync(DAEMON_SOCK, 0o777); } catch {}
   });
-  return server;
+
+  // TCP listener with TCP_NODELAY for streaming
+  const tcpServer = net.createServer((conn) => {
+    conn.setNoDelay(true);
+    handleConnection(conn);
+  });
+  tcpServer.listen(DAEMON_PORT, "127.0.0.1");
+
+  return {
+    unix: unixServer,
+    tcp: tcpServer,
+    close() {
+      unixServer.close();
+      tcpServer.close();
+    },
+  };
 }
 
 async function handleMessage(
@@ -263,4 +282,4 @@ function sendResponse(conn: net.Socket, msg: object): void {
   conn.write(encodeMessage(msg));
 }
 
-export { DAEMON_SOCK };
+export { DAEMON_SOCK, DAEMON_PORT };

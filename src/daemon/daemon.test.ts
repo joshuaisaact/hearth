@@ -1,17 +1,17 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { existsSync } from "node:fs";
 import net from "node:net";
-import { startDaemon, DAEMON_SOCK } from "./server.js";
+import { startDaemon, DAEMON_SOCK, type DaemonServers } from "./server.js";
 import { DaemonClient } from "./client.js";
 
 const hasKvm = existsSync("/dev/kvm");
 
 describe.skipIf(!hasKvm)("Daemon", () => {
-  let server: net.Server;
+  let servers: DaemonServers;
   let client: DaemonClient;
 
   beforeAll(async () => {
-    server = startDaemon();
+    servers = startDaemon();
     client = new DaemonClient();
     // Wait for server to be listening
     await new Promise<void>((resolve) => {
@@ -26,7 +26,7 @@ describe.skipIf(!hasKvm)("Daemon", () => {
 
   afterAll(() => {
     client.close();
-    server.close();
+    servers.close();
   });
 
   it("should create a sandbox and exec via daemon", async () => {

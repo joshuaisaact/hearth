@@ -5,11 +5,12 @@ const command = process.argv[2];
 if (command === "setup") {
   await import("./setup.js");
 } else if (command === "daemon") {
-  const { startDaemon, DAEMON_SOCK } = await import("../daemon/server.js");
-  const server = startDaemon();
+  const { startDaemon, DAEMON_SOCK, DAEMON_PORT } = await import("../daemon/server.js");
+  const servers = startDaemon();
   console.log(`hearth daemon listening on ${DAEMON_SOCK}`);
-  process.on("SIGINT", () => { server.close(); process.exit(0); });
-  process.on("SIGTERM", () => { server.close(); process.exit(0); });
+  console.log(`hearth daemon listening on tcp://127.0.0.1:${DAEMON_PORT}`);
+  process.on("SIGINT", () => { servers.close(); process.exit(0); });
+  process.on("SIGTERM", () => { servers.close(); process.exit(0); });
 } else if (command === "shell") {
   const { shellCommand } = await import("./shell.js");
   await shellCommand(process.argv.slice(3));
