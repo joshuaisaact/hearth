@@ -69,12 +69,33 @@ Firecracker's drive layer uses standard `open()` — it accepts regular files, b
 
 However: the Jailer (Firecracker's security isolation) does more restrictive path handling. Since Hearth doesn't use the Jailer, this isn't a concern.
 
+### 9. Lima SSH socket forwarding lifecycle
+
+Lima forwards guest Unix sockets to the host via `ssh -L`. Critical behaviour: SSH creates the host-side socket file **once** when the forward is established. If the host socket is deleted, the forward breaks permanently — SSH does not recreate it. Lima re-establishes forwards on VM start, not on daemon restart.
+
+**Implication**: never delete `~/.hearth/daemon.sock` on macOS. Let Lima manage it. The daemon can be killed and restarted inside the VM — the SSH forward reconnects to the new guest socket transparently. But deleting the host socket kills the forward.
+
+### 10. dm-thin performance on Lima (M4 Pro)
+
+Benchmark results with dm-thin block-level CoW vs file copies over virtiofs:
+
+| Approach | Avg | Notes |
+|----------|-----|-------|
+| File copies (virtiofs) | 1,756ms | Non-root daemon |
+| dm-thin (direct) | 594ms | Root, inside Lima |
+| dm-thin (daemon, macOS) | 578ms | Root daemon, socket forwarding |
+
+3x improvement. The remaining ~580ms is dominated by vmstate/memory file copy + Firecracker snapshot load + agent reconnect. The rootfs copy itself is ~1ms with dm-thin.
+
+Thin pool doesn't survive VM reboots (loopback devices are ephemeral). Needs a boot script to re-activate — tracked in v0.4 exec plan.
+
 ## Architecture decisions made
 
 - **Lima portForwards for socket sharing**: The daemon stays on a Unix socket everywhere. Lima's built-in `portForwards` config forwards the guest socket to the host via SSH tunneling. No TCP, no extra transport code.
 - **HEARTH_DIR env var**: Simple, composable, works everywhere. No Lima-specific code paths in the core — just a different env var.
 - **HEARTH_DAEMON_SOCK env var**: Inside Lima, the daemon listens at `/run/hearth/daemon.sock` (not under `~/.hearth`) because Lima forwards it to the host. The env var overrides the default.
-- **sudo for setup, user for daemon**: Setup needs root (docker, KVM). Daemon runs as the regular user after KVM permissions are fixed.
+- **sudo for setup and daemon**: Setup needs root (docker, KVM). Daemon also runs as root for dm-thin access. Socket chmod'd to 777 (directory is 700).
+- **Never delete host socket**: Lima's SSH forward creates `~/.hearth/daemon.sock` once per VM start. Deleting it kills the forward. Let Lima manage the host socket lifecycle.
 
 ## What works end-to-end
 
