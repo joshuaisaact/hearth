@@ -111,8 +111,8 @@ export function setupThinPool(rootfsPath: string): boolean {
       execFileSync("truncate", ["-s", `${DEFAULT_META_SIZE_MB}M`, metaFile], { stdio: "pipe" });
     }
 
-    // Zero metadata (required for fresh thin-pool)
-    execFileSync("dd", ["if=/dev/zero", `of=${metaFile}`, "bs=4096", "count=1"], { stdio: "pipe" });
+    // Zero first block of metadata (required for fresh thin-pool, conv=notrunc preserves file size)
+    execFileSync("dd", ["if=/dev/zero", `of=${metaFile}`, "bs=4096", "count=1", "conv=notrunc"], { stdio: "pipe" });
 
     // Attach loopback devices and create the pool
     if (!attachPool(dataFile, metaFile)) {
