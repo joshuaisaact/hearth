@@ -155,8 +155,7 @@ portForwards:
 
 provision:
   - mode: boot
-    description: "Hearth boot-time setup (runs every boot)"
-    script: |
+script: |
       #!/bin/bash
       # Fix /dev/kvm permissions (VZ creates it as 0660 root:kvm on each boot)
       [ -e /dev/kvm ] && chmod 666 /dev/kvm
@@ -166,8 +165,7 @@ provision:
       chown "$LIMA_USER:$LIMA_USER" /run/hearth
       chmod 700 /run/hearth
   - mode: system
-    description: "Hearth one-time provisioning"
-    script: |
+script: |
       #!/bin/bash
       set -eux
       # Node.js 22

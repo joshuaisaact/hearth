@@ -108,9 +108,10 @@ export interface DaemonServers {
 }
 
 export function startDaemon(): DaemonServers {
-  // Unix socket listener
+  // Unix socket listener (may fail on virtiofs in Lima — that's OK, TCP is primary)
   try { unlinkSync(DAEMON_SOCK); } catch {}
   const unixServer = net.createServer(handleConnection);
+  unixServer.on("error", () => {}); // Suppress if unsupported (e.g. virtiofs)
   unixServer.listen(DAEMON_SOCK, () => {
     try { chmodSync(DAEMON_SOCK, 0o777); } catch {}
   });
