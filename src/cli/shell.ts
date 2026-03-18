@@ -59,7 +59,7 @@ export async function shellCommand(args: string[]): Promise<void> {
   const cols = process.stdout.columns || 80;
   const rows = process.stdout.rows || 24;
 
-  const handle: SpawnHandle = sandbox.spawn("/bin/bash -l", {
+  const handle: SpawnHandle = sandbox.spawn("/bin/sh -l", {
     interactive: true,
     cols,
     rows,
