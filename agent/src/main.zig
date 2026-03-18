@@ -308,6 +308,192 @@ fn handleSpawn(sock: linux.fd_t, cmd_str: []const u8, timeout: u32) void {
     sendMsg(sock, exit_msg) catch {};
 }
 
+// Static buffers for interactive spawn
+var stdin_buf: [4096]u8 = undefined;
+var interactive_recv_buf: [32768]u8 = undefined;
+
+const c = @cImport({
+    @cInclude("pty.h");
+    @cInclude("poll.h");
+    @cInclude("sys/ioctl.h");
+    @cInclude("sys/wait.h");
+    @cInclude("signal.h");
+    @cInclude("unistd.h");
+});
+
+fn handleInteractiveSpawn(sock: linux.fd_t, cmd_str: []const u8, cols: u16, rows: u16) void {
+    var sh_argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", null };
+
+    var cmd_buf: [4096]u8 = undefined;
+    if (cmd_str.len >= cmd_buf.len) {
+        sendMsg(sock, formatError(&spawn_msg, "command too long")) catch {};
+        return;
+    }
+    @memcpy(cmd_buf[0..cmd_str.len], cmd_str);
+    cmd_buf[cmd_str.len] = 0;
+    sh_argv[2] = @ptrCast(cmd_buf[0..cmd_str.len :0]);
+
+    // Use libc openpty() — handles ptmx open, grantpt, unlockpt, slave open
+    var master_fd: c_int = undefined;
+    var slave_fd: c_int = undefined;
+    var ws = c.winsize{ .ws_row = rows, .ws_col = cols, .ws_xpixel = 0, .ws_ypixel = 0 };
+
+    if (c.openpty(&master_fd, &slave_fd, null, null, &ws) < 0) {
+        sendMsg(sock, formatError(&spawn_msg, "openpty failed")) catch {};
+        return;
+    }
+
+    const pid = c.fork();
+    if (pid < 0) {
+        _ = c.close(master_fd);
+        _ = c.close(slave_fd);
+        sendMsg(sock, formatError(&spawn_msg, "fork failed")) catch {};
+        return;
+    }
+
+    if (pid == 0) {
+        // Child: new session + controlling terminal
+        _ = c.close(master_fd);
+        _ = c.setsid();
+        _ = c.ioctl(slave_fd, c.TIOCSCTTY, @as(c_int, 0));
+        _ = c.dup2(slave_fd, 0);
+        _ = c.dup2(slave_fd, 1);
+        _ = c.dup2(slave_fd, 2);
+        if (slave_fd > 2) _ = c.close(slave_fd);
+
+        const envp = [_:null]?[*:0]const u8{
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "HOME=/root",
+            "TERM=xterm-256color",
+        };
+        _ = linux.execve("/bin/sh", @ptrCast(&sh_argv), @ptrCast(&envp));
+        linux.exit_group(127);
+    }
+
+    // Parent
+    _ = c.close(slave_fd);
+    const child_pid: linux.pid_t = @intCast(pid);
+
+    var pfds = [2]c.struct_pollfd{
+        .{ .fd = master_fd, .events = c.POLLIN, .revents = 0 },
+        .{ .fd = sock, .events = c.POLLIN, .revents = 0 },
+    };
+
+    var child_exited = false;
+    var recv_carry: usize = 0; // bytes carried over from partial frame reads
+
+    while (true) {
+        const poll_rc = c.poll(&pfds, 2, 300);
+        if (poll_rc < 0) continue; // EINTR or other — retry
+
+        // Check child exit on every iteration
+        {
+            var wstatus: c_int = 0;
+            if (c.waitpid(child_pid, &wstatus, c.WNOHANG) > 0) {
+                // Drain remaining PTY output
+                while (true) {
+                    const drain_n: isize = @bitCast(linux.read(master_fd, &spawn_chunk, spawn_chunk.len));
+                    if (drain_n <= 0) break;
+                    sendStreamChunk(sock, "stdout", spawn_chunk[0..@intCast(drain_n)]) catch break;
+                }
+                child_exited = true;
+                const exit_code: i32 = if (c.WIFEXITED(wstatus)) c.WEXITSTATUS(wstatus) else -1;
+                const exit_msg = std.fmt.bufPrint(&spawn_msg,
+                    \\{{"type":"exit","code":{}}}
+                , .{exit_code}) catch break;
+                sendMsg(sock, exit_msg) catch {};
+                break;
+            }
+        }
+
+        if (poll_rc == 0) continue;
+
+        // Read PTY output → send to host
+        if (pfds[0].revents & (c.POLLIN | c.POLLHUP) != 0) {
+            const n: isize = @bitCast(linux.read(master_fd, &spawn_chunk, spawn_chunk.len));
+            if (n > 0) {
+                sendStreamChunk(sock, "stdout", spawn_chunk[0..@intCast(n)]) catch break;
+            } else if (pfds[0].revents & c.POLLHUP != 0) {
+                break;
+            }
+        }
+
+        // Read vsock → parse stdin/resize messages
+        if (pfds[1].revents & (c.POLLIN | c.POLLHUP) != 0) {
+            if (pfds[1].revents & c.POLLHUP != 0) break;
+
+            const space = interactive_recv_buf.len - recv_carry;
+            if (space == 0) { recv_carry = 0; continue; } // buffer full, drop
+            const n: isize = @bitCast(linux.read(sock, interactive_recv_buf[recv_carry..].ptr, space));
+            if (n <= 0) break;
+
+            const recv_len: usize = recv_carry + @as(usize, @intCast(n));
+            var offset: usize = 0;
+            while (offset + 4 <= recv_len) {
+                const msg_len = std.mem.readInt(u32, interactive_recv_buf[offset..][0..4], .little);
+                if (offset + 4 + msg_len > recv_len) break;
+                const msg_data = interactive_recv_buf[offset + 4 .. offset + 4 + msg_len];
+                offset += 4 + msg_len;
+
+                const msg_type = jsonStr(msg_data, "type") orelse continue;
+
+                if (std.mem.eql(u8, msg_type, "stdin")) {
+                    const b64_data = jsonStr(msg_data, "data") orelse continue;
+                    const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(b64_data) catch continue;
+                    if (decoded_len > stdin_buf.len) continue;
+                    std.base64.standard.Decoder.decode(stdin_buf[0..decoded_len], b64_data) catch continue;
+                    writeAll(master_fd, stdin_buf[0..decoded_len]) catch break;
+                } else if (std.mem.eql(u8, msg_type, "resize")) {
+                    const new_cols = jsonU32(msg_data, "cols");
+                    const new_rows = jsonU32(msg_data, "rows");
+                    if (new_cols > 0 and new_cols <= 65535 and new_rows > 0 and new_rows <= 65535) {
+                        var new_ws = c.winsize{
+                            .ws_row = @intCast(new_rows),
+                            .ws_col = @intCast(new_cols),
+                            .ws_xpixel = 0,
+                            .ws_ypixel = 0,
+                        };
+                        _ = c.ioctl(master_fd, c.TIOCSWINSZ, &new_ws);
+                    }
+                }
+            }
+
+            // Carry over any partial frame to next read
+            if (offset < recv_len) {
+                const remaining = recv_len - offset;
+                std.mem.copyForwards(u8, interactive_recv_buf[0..remaining], interactive_recv_buf[offset..recv_len]);
+                recv_carry = remaining;
+            } else {
+                recv_carry = 0;
+            }
+        }
+    }
+
+    if (!child_exited) {
+        // Drain remaining PTY output before closing
+        while (true) {
+            const drain_n: isize = @bitCast(linux.read(master_fd, &spawn_chunk, spawn_chunk.len));
+            if (drain_n <= 0) break;
+            sendStreamChunk(sock, "stdout", spawn_chunk[0..@intCast(drain_n)]) catch break;
+        }
+
+        // Signal the child to exit so waitpid doesn't block indefinitely
+        _ = c.kill(child_pid, c.SIGHUP);
+    }
+
+    _ = c.close(master_fd);
+
+    if (!child_exited) {
+        var wstatus: c_int = 0;
+        _ = c.waitpid(child_pid, &wstatus, 0);
+        const exit_code: i32 = if (c.WIFEXITED(wstatus)) c.WEXITSTATUS(wstatus) else -1;
+        const exit_msg = std.fmt.bufPrint(&spawn_msg,
+            \\{{"type":"exit","code":{}}}
+        , .{exit_code}) catch return;
+        sendMsg(sock, exit_msg) catch {};
+    }
+}
+
 fn sendStreamChunk(sock: linux.fd_t, stream_type: []const u8, data: []const u8) !void {
     const b64_len = std.base64.standard.Encoder.calcSize(data.len);
     if (b64_len > spawn_b64.len) return;
@@ -833,9 +1019,17 @@ pub fn main() !void {
                 const cmd = jsonStr(payload, "cmd") orelse {
                     break :blk formatError(&main_resp_buf, "missing cmd");
                 };
-                const timeout = jsonU32(payload, "timeout");
-                // spawn sends multiple messages directly — no single response
-                handleSpawn(sock, cmd, timeout);
+                const is_interactive = if (jsonStr(payload, "interactive")) |v| std.mem.eql(u8, v, "true") else false;
+                if (is_interactive) {
+                    const cols_val = jsonU32(payload, "cols");
+                    const rows_val = jsonU32(payload, "rows");
+                    const cols: u16 = if (cols_val == 0) 80 else @intCast(@min(cols_val, 65535));
+                    const rows: u16 = if (rows_val == 0) 24 else @intCast(@min(rows_val, 65535));
+                    handleInteractiveSpawn(sock, cmd, cols, rows);
+                } else {
+                    const timeout = jsonU32(payload, "timeout");
+                    handleSpawn(sock, cmd, timeout);
+                }
                 continue;
             } else if (std.mem.eql(u8, method, "ping")) blk: {
                 break :blk std.fmt.bufPrint(&main_resp_buf, "{{\"ok\":true}}", .{}) catch "{}";

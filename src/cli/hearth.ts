@@ -10,6 +10,9 @@ if (command === "setup") {
   console.log(`hearth daemon listening on ${DAEMON_SOCK}`);
   process.on("SIGINT", () => { server.close(); process.exit(0); });
   process.on("SIGTERM", () => { server.close(); process.exit(0); });
+} else if (command === "shell") {
+  const { shellCommand } = await import("./shell.js");
+  await shellCommand(process.argv.slice(3));
 } else if (command === "lima") {
   const { limaCommand } = await import("./lima.js");
   await limaCommand(process.argv.slice(3));
@@ -18,6 +21,7 @@ if (command === "setup") {
   console.log("");
   console.log("Commands:");
   console.log("  setup    Download and configure all dependencies");
+  console.log("  shell    Start an interactive shell in a sandbox");
   console.log("  daemon   Start the Hearth daemon (for macOS/multi-process)");
   console.log("  lima     Manage Lima VM for macOS (setup, start, stop, status, teardown)");
   process.exit(command ? 1 : 0);

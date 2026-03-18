@@ -7,6 +7,11 @@ import { encodeMessage } from "../util.js";
 export interface SpawnHandle {
   stdout: EventEmitter;
   stderr: EventEmitter;
+  stdin: {
+    write(data: string | Buffer): void;
+    close(): void;
+  };
+  resize(cols: number, rows: number): void;
   wait(): Promise<{ exitCode: number }>;
   kill(): void;
 }
@@ -144,7 +149,7 @@ export class AgentClient {
 
   spawn(
     command: string,
-    opts?: { timeout?: number },
+    opts?: { timeout?: number; interactive?: boolean; cols?: number; rows?: number },
   ): SpawnHandle {
     if (!this.socket) throw new AgentError("Agent not connected");
 
@@ -153,6 +158,11 @@ export class AgentClient {
       cmd: command,
     };
     if (opts?.timeout) payload.timeout = Math.ceil(opts.timeout / 1000);
+    if (opts?.interactive) {
+      payload.interactive = true;
+      if (opts.cols) payload.cols = opts.cols;
+      if (opts.rows) payload.rows = opts.rows;
+    }
 
     const stdoutEmitter = new EventEmitter();
     const stderrEmitter = new EventEmitter();
@@ -214,6 +224,19 @@ export class AgentClient {
     return {
       stdout: stdoutEmitter,
       stderr: stderrEmitter,
+      stdin: {
+        write(data: string | Buffer): void {
+          const buf = Buffer.isBuffer(data) ? data : Buffer.from(data, "utf-8");
+          socket.write(encodeMessage({ type: "stdin", data: buf.toString("base64") }));
+        },
+        close(): void {
+          // Not currently handled by the guest agent — the child process
+          // receives EOF when the PTY master is closed on sandbox destroy.
+        },
+      },
+      resize(cols: number, rows: number): void {
+        socket.write(encodeMessage({ type: "resize", cols, rows }));
+      },
       wait: () => exitPromise,
       kill: () => {
         // Not yet implemented — the process will exit when its timeout fires,

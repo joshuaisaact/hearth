@@ -16,4 +16,9 @@ export interface CommandOptions {
 }
 
 export type ExecOptions = CommandOptions;
-export type SpawnOptions = CommandOptions;
+
+export interface SpawnOptions extends CommandOptions {
+  interactive?: boolean;
+  cols?: number;
+  rows?: number;
+}
