@@ -6,6 +6,7 @@ import { DaemonClient } from "../daemon/client.js";
 import type { SpawnHandle } from "../agent/client.js";
 
 interface SandboxLike {
+  enableInternet(): Promise<void>;
   spawn(command: string, opts: { interactive: boolean; cols: number; rows: number }): SpawnHandle;
   destroy(): Promise<void>;
 }
@@ -42,13 +43,18 @@ async function createSandbox(snapshotName?: string): Promise<{ sandbox: SandboxL
 }
 
 export async function shellCommand(args: string[]): Promise<void> {
-  const snapshotName = args[0];
+  const noInternet = args.includes("--no-internet");
+  const snapshotName = args.find(a => !a.startsWith("--"));
 
   console.log(snapshotName
     ? `Restoring sandbox from snapshot "${snapshotName}"...`
     : "Creating sandbox...");
 
   const { sandbox, cleanup } = await createSandbox(snapshotName);
+
+  if (!noInternet) {
+    await sandbox.enableInternet();
+  }
 
   const cols = process.stdout.columns || 80;
   const rows = process.stdout.rows || 24;
