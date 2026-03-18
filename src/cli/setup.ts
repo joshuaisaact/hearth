@@ -18,6 +18,7 @@ import { download, fetchText } from "./download.js";
 import { getHearthDir } from "../vm/binary.js";
 import { errorMessage } from "../util.js";
 import { getPlatform } from "../platform.js";
+import { setupThinPool as initThinPool, canUseThinPool } from "../vm/thin.js";
 
 const HEARTH_DIR = getHearthDir();
 const BIN_DIR = join(HEARTH_DIR, "bin");
@@ -59,6 +60,7 @@ async function main() {
   // Rootfs depends on agent binary; snapshot depends on rootfs
   await setupRootfs();
   await createBaseSnapshot();
+  await setupThinPool();
 
   reportFilesystem();
 
@@ -307,6 +309,20 @@ async function createBaseSnapshot() {
   console.log("  snapshot: creating base snapshot (booting VM, ~2s)...");
   await ensureBaseSnapshot();
   console.log("  snapshot: created");
+}
+
+async function setupThinPool() {
+  if (!canUseThinPool()) {
+    console.log("  thin pool: skipped (requires root)");
+    return;
+  }
+
+  const rootfsPath = join(BASES_DIR, "ubuntu-24.04.ext4");
+  if (initThinPool(rootfsPath)) {
+    console.log("  thin pool: active (instant CoW snapshots)");
+  } else {
+    console.log("  thin pool: setup failed (falling back to file copies)");
+  }
 }
 
 function reportFilesystem() {
