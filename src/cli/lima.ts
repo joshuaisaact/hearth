@@ -278,10 +278,6 @@ async function limaStart(): Promise<void> {
   const wasStarted = status === "running";
 
   if (status === "stopped") {
-    // Remove stale socket from previous session
-    const hostSock = daemonHostSocket();
-    try { unlinkSync(hostSock); } catch {}
-
     console.log("  Starting Lima VM...");
     limactlSync(["start", INSTANCE_NAME]);
     console.log("  ✓ VM running");
@@ -319,7 +315,6 @@ function limaStop(): void {
     } catch {}
     console.log("  Stopping Lima VM...");
     limactlSync(["stop", INSTANCE_NAME]);
-    try { unlinkSync(daemonHostSocket()); } catch {}
     console.log("  ✓ Stopped");
   } else {
     console.log("  Lima VM already stopped");

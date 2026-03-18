@@ -1,5 +1,5 @@
 import net from "node:net";
-import { unlinkSync } from "node:fs";
+import { unlinkSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { Sandbox } from "../sandbox/sandbox.js";
 import { getHearthDir } from "../vm/binary.js";
@@ -105,7 +105,11 @@ export function startDaemon(): net.Server {
     });
   });
 
-  server.listen(DAEMON_SOCK);
+  server.listen(DAEMON_SOCK, () => {
+    // Make socket accessible to non-root users (e.g. Lima's SSH-based forwarding).
+    // The socket directory (/run/hearth) is already restricted to mode 700.
+    try { chmodSync(DAEMON_SOCK, 0o777); } catch {}
+  });
   return server;
 }
 

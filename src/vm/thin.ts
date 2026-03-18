@@ -15,12 +15,14 @@ import { join } from "node:path";
 import { getHearthDir } from "./binary.js";
 
 const POOL_NAME = "hearth-pool";
-const POOL_FILE = "thin-pool.img";
+const DATA_FILE = "thin-data.img";
+const META_FILE = "thin-meta.img";
 const BASE_VOLUME_ID = 0;
 const SECTOR_SIZE = 512;
 
-// Default pool size: 20GB sparse (only allocates on write)
-const DEFAULT_POOL_SIZE_GB = 20;
+// Default sizes (sparse — only allocate on write)
+const DEFAULT_DATA_SIZE_GB = 20;
+const DEFAULT_META_SIZE_MB = 128;
 
 /** Check if dm-thin is available and the pool exists. */
 export function isThinPoolAvailable(): boolean {
@@ -48,32 +50,40 @@ export function setupThinPool(rootfsPath: string): boolean {
   if (!canUseThinPool()) return false;
 
   const hearthDir = getHearthDir();
-  const poolFile = join(hearthDir, POOL_FILE);
+  const dataFile = join(hearthDir, DATA_FILE);
+  const metaFile = join(hearthDir, META_FILE);
 
   try {
     if (isThinPoolAvailable()) {
       return true; // Already set up
     }
 
-    // Create sparse pool file
-    if (!existsSync(poolFile)) {
-      execFileSync("truncate", ["-s", `${DEFAULT_POOL_SIZE_GB}G`, poolFile], { stdio: "pipe" });
+    // Create sparse data and metadata files
+    if (!existsSync(dataFile)) {
+      execFileSync("truncate", ["-s", `${DEFAULT_DATA_SIZE_GB}G`, dataFile], { stdio: "pipe" });
+    }
+    if (!existsSync(metaFile)) {
+      execFileSync("truncate", ["-s", `${DEFAULT_META_SIZE_MB}M`, metaFile], { stdio: "pipe" });
     }
 
-    // Set up loopback device
-    const loopDev = execFileSync("losetup", ["--find", "--show", poolFile], { stdio: "pipe" })
+    // Set up loopback devices
+    const dataLoop = execFileSync("losetup", ["--find", "--show", dataFile], { stdio: "pipe" })
+      .toString().trim();
+    const metaLoop = execFileSync("losetup", ["--find", "--show", metaFile], { stdio: "pipe" })
       .toString().trim();
 
-    // Get device size in sectors
-    const poolSectors = execFileSync("blockdev", ["--getsz", loopDev], { stdio: "pipe" })
+    // Get data device size in sectors
+    const dataSectors = execFileSync("blockdev", ["--getsz", dataLoop], { stdio: "pipe" })
       .toString().trim();
 
-    // Create thin pool
-    // Using a simplified layout: data and metadata share the same device
-    // Block size 128 sectors (64KB) is a good default for mixed workloads
+    // Zero the metadata device (required for thin-pool)
+    execFileSync("dd", ["if=/dev/zero", `of=${metaLoop}`, "bs=4096", "count=1"], { stdio: "pipe" });
+
+    // Create thin pool with separate data and metadata devices
+    // Block size 128 sectors (64KB)
     execFileSync("dmsetup", [
       "create", POOL_NAME,
-      "--table", `0 ${poolSectors} thin-pool ${loopDev} ${loopDev} 128 0`,
+      "--table", `0 ${dataSectors} thin-pool ${metaLoop} ${dataLoop} 128 0`,
     ], { stdio: "pipe" });
 
     // Create base thin volume (ID 0)
@@ -100,7 +110,7 @@ export function setupThinPool(rootfsPath: string): boolean {
     execFileSync("dmsetup", ["remove", `${POOL_NAME}-base`], { stdio: "pipe" });
 
     return true;
-  } catch (err) {
+  } catch {
     // Clean up on failure
     try { execFileSync("dmsetup", ["remove", `${POOL_NAME}-base`], { stdio: "pipe" }); } catch {}
     try { execFileSync("dmsetup", ["remove", POOL_NAME], { stdio: "pipe" }); } catch {}
@@ -224,15 +234,17 @@ export function destroyThinPool(): void {
     // Remove the pool
     execFileSync("dmsetup", ["remove", POOL_NAME], { stdio: "pipe" });
 
-    // Detach loopback
-    const poolFile = join(getHearthDir(), POOL_FILE);
-    try {
-      const loopDev = execFileSync("losetup", ["-j", poolFile], { stdio: "pipe" })
-        .toString().split(":")[0];
-      if (loopDev) {
-        execFileSync("losetup", ["-d", loopDev], { stdio: "pipe" });
-      }
-    } catch {}
+    // Detach loopback devices
+    const hearthDir = getHearthDir();
+    for (const file of [DATA_FILE, META_FILE]) {
+      try {
+        const output = execFileSync("losetup", ["-j", join(hearthDir, file)], { stdio: "pipe" }).toString();
+        const loopDev = output.split(":")[0];
+        if (loopDev) {
+          execFileSync("losetup", ["-d", loopDev], { stdio: "pipe" });
+        }
+      } catch {}
+    }
   } catch {}
 }
 
