@@ -17,7 +17,6 @@ import { arch, tmpdir } from "node:os";
 import { download, fetchText } from "./download.js";
 import { getHearthDir } from "../vm/binary.js";
 import { errorMessage } from "../util.js";
-import { getPlatform } from "../platform.js";
 import { setupThinPool as initThinPool, canUseThinPool } from "../vm/thin.js";
 
 const HEARTH_DIR = getHearthDir();
@@ -37,18 +36,6 @@ const GITHUB_REPO = "joshuaisaact/hearth";
 
 async function main() {
   console.log("hearth setup\n");
-
-  const plat = getPlatform();
-  if (plat === "macos") {
-    console.error("ERROR: hearth setup must run on Linux (it needs /dev/kvm).");
-    console.error("");
-    console.error("  On macOS with M3+ chip, use Lima:");
-    console.error("    npx hearth lima setup");
-    console.error("");
-    console.error("  On M1/M2, use a remote daemon:");
-    console.error("    See docs/design-docs/platform-support.md");
-    process.exit(1);
-  }
 
   checkKvm();
 
