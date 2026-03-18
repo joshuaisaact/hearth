@@ -424,9 +424,11 @@ function startDaemonInLima(): void {
   // Lima's portForwards config forwards it to ~/.hearth/daemon.sock on macOS.
   // Set HEARTH_DIR so the daemon finds Firecracker/kernel/rootfs on the shared mount.
   const hearthDir = limaHearthDir();
+  // Run as root for dm-thin access (block-level CoW snapshots).
+  // The boot script already set /run/hearth ownership, so the socket is accessible.
   nodeSpawn(
     "limactl",
-    ["shell", INSTANCE_NAME, "--", "bash", "-c",
+    ["shell", INSTANCE_NAME, "--", "sudo", "bash", "-c",
       `cd '${shellEscape(hearthRoot)}' && HEARTH_DIR='${shellEscape(hearthDir)}' HEARTH_DAEMON_SOCK=${DAEMON_GUEST_SOCK} nohup node dist/cli/hearth.js daemon > ${DAEMON_LOG} 2>&1 &`,
     ],
     { stdio: "ignore", detached: true },
