@@ -45,6 +45,42 @@ export function canUseThinPool(): boolean {
   }
 }
 
+/**
+ * Re-activate an existing thin pool after reboot.
+ * The data/meta files persist on disk but loopback devices are ephemeral.
+ * Returns true if the pool was successfully activated.
+ */
+export function activateThinPool(): boolean {
+  if (!canUseThinPool()) return false;
+  if (isThinPoolAvailable()) return true;
+
+  const hearthDir = getHearthDir();
+  const dataFile = join(hearthDir, DATA_FILE);
+  const metaFile = join(hearthDir, META_FILE);
+
+  // Pool files must exist from a previous setupThinPool call
+  if (!existsSync(dataFile) || !existsSync(metaFile)) return false;
+
+  try {
+    const dataLoop = execFileSync("losetup", ["--find", "--show", dataFile], { stdio: "pipe" })
+      .toString().trim();
+    const metaLoop = execFileSync("losetup", ["--find", "--show", metaFile], { stdio: "pipe" })
+      .toString().trim();
+
+    const dataSectors = execFileSync("blockdev", ["--getsz", dataLoop], { stdio: "pipe" })
+      .toString().trim();
+
+    execFileSync("dmsetup", [
+      "create", POOL_NAME,
+      "--table", `0 ${dataSectors} thin-pool ${metaLoop} ${dataLoop} 128 0`,
+    ], { stdio: "pipe" });
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Create the thin pool and import the base rootfs. Returns true on success. */
 export function setupThinPool(rootfsPath: string): boolean {
   if (!canUseThinPool()) return false;

@@ -160,9 +160,9 @@ provision:
       # Fix /dev/kvm permissions (VZ creates it as 0660 root:kvm on each boot)
       [ -e /dev/kvm ] && chmod 666 /dev/kvm
       # Ensure daemon socket directory exists with correct ownership
-      . /mnt/lima-cidata/lima.env
+      LIMA_USER=$(grep LIMA_CIDATA_USER= /mnt/lima-cidata/lima.env | head -1 | cut -d= -f2)
       mkdir -p /run/hearth
-      chown "$LIMA_CIDATA_USER:$LIMA_CIDATA_USER" /run/hearth
+      chown "$LIMA_USER:$LIMA_USER" /run/hearth
       chmod 700 /run/hearth
   - mode: system
     description: "Hearth one-time provisioning"
@@ -174,9 +174,9 @@ provision:
       apt-get install -y nodejs
       # Docker (for rootfs build)
       curl -fsSL https://get.docker.com | bash -
-      . /mnt/lima-cidata/lima.env
-      usermod -aG docker "$LIMA_CIDATA_USER"
-      usermod -aG kvm "$LIMA_CIDATA_USER"
+      LIMA_USER=$(grep LIMA_CIDATA_USER= /mnt/lima-cidata/lima.env | head -1 | cut -d= -f2)
+      usermod -aG docker "$LIMA_USER"
+      usermod -aG kvm "$LIMA_USER"
 `;
 }
 
@@ -414,13 +414,18 @@ function limaHearthDir(): string {
 
 function startDaemonInLima(): void {
   const hearthRoot = findHearthRoot();
+  const hearthDir = limaHearthDir();
+
+  // Activate dm-thin pool if data files exist (pool doesn't survive VM reboots)
+  try {
+    execFileSync("limactl", ["shell", INSTANCE_NAME, "--", "sudo", "bash", "-c",
+      `cd '${shellEscape(hearthRoot)}' && HEARTH_DIR='${shellEscape(hearthDir)}' node -e "import('./dist/vm/thin.js').then(m => m.activateThinPool())"`,
+    ], { stdio: "pipe" });
+  } catch {}
 
   // Daemon listens on a Unix socket inside the guest.
   // Lima's portForwards config forwards it to ~/.hearth/daemon.sock on macOS.
-  // Set HEARTH_DIR so the daemon finds Firecracker/kernel/rootfs on the shared mount.
-  const hearthDir = limaHearthDir();
   // Run as root for dm-thin access (block-level CoW snapshots).
-  // The boot script already set /run/hearth ownership, so the socket is accessible.
   nodeSpawn(
     "limactl",
     ["shell", INSTANCE_NAME, "--", "sudo", "bash", "-c",
