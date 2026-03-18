@@ -225,7 +225,12 @@ export class Sandbox {
   /** Spawn a long-running command with streaming stdout/stderr. */
   spawn(command: string, opts?: SpawnOptions): SpawnHandle {
     this.ensureAlive();
-    return this.agent.spawn(wrapCommand(command, this.mergeProxyEnv(opts)), { timeout: opts?.timeout });
+    return this.agent.spawn(wrapCommand(command, this.mergeProxyEnv(opts)), {
+      timeout: opts?.timeout,
+      interactive: opts?.interactive,
+      cols: opts?.cols,
+      rows: opts?.rows,
+    });
   }
 
   /**

@@ -42,6 +42,7 @@ export class DaemonClient {
     stderr: EventEmitter;
     exitResolve: (result: { exitCode: number }) => void;
   }>();
+  private pendingSpawnEvents = new Map<number, DaemonResponse[]>();
   private nextReqId = 1;
 
   async connect(socketPath: string = DEFAULT_SOCKET): Promise<void> {
@@ -81,7 +82,17 @@ export class DaemonClient {
     // Spawn stream events
     if (msg.event && msg.spawnId !== undefined) {
       const listener = this.spawnListeners.get(msg.spawnId);
-      if (!listener) return;
+      if (!listener) {
+        // Events may arrive before the spawn request resolves.
+        // Buffer them and replay once the listener is registered.
+        let buf = this.pendingSpawnEvents.get(msg.spawnId);
+        if (!buf) {
+          buf = [];
+          this.pendingSpawnEvents.set(msg.spawnId, buf);
+        }
+        if (buf.length < 1000) buf.push(msg); // cap to prevent unbounded growth
+        return;
+      }
 
       if (msg.event === "stdout") {
         listener.stdout.emit("data", msg.data);
@@ -108,6 +119,16 @@ export class DaemonClient {
     }
   }
 
+  /** Replay any spawn events that arrived before the listener was registered. */
+  private drainPendingEvents(spawnId: number): void {
+    const buffered = this.pendingSpawnEvents.get(spawnId);
+    if (!buffered) return;
+    this.pendingSpawnEvents.delete(spawnId);
+    for (const msg of buffered) {
+      this.handleResponse(msg);
+    }
+  }
+
   private request(msg: object): Promise<DaemonResponse> {
     return new Promise((resolve, reject) => {
       if (!this.conn) {
@@ -118,6 +139,15 @@ export class DaemonClient {
       this.pending.set(reqId, { resolve, reject });
       this.conn.write(encodeMessage({ ...msg, reqId }));
     });
+  }
+
+  /** Send a message without waiting for a response (fire-and-forget). */
+  private sendNoReply(msg: object): void {
+    if (!this.conn) return;
+    const reqId = this.nextReqId++;
+    const cleanup = () => { this.pending.delete(reqId); };
+    this.pending.set(reqId, { resolve: cleanup as (v: DaemonResponse) => void, reject: cleanup as (e: Error) => void });
+    this.conn.write(encodeMessage({ ...msg, reqId }));
   }
 
   async create(): Promise<RemoteSandbox> {
@@ -158,16 +188,47 @@ export class DaemonClient {
       exitResolve = resolve;
     });
 
-    this.request({ method: "spawn", sandboxId, command, opts }).then((r) => {
+    let resolvedSpawnId: number | undefined;
+    const spawnReady = this.request({ method: "spawn", sandboxId, command, opts }).then((r) => {
       if (r.spawnId === undefined) { exitResolve({ exitCode: 1 }); return; }
+      resolvedSpawnId = r.spawnId;
       this.spawnListeners.set(r.spawnId, { stdout, stderr, exitResolve });
+      this.drainPendingEvents(r.spawnId);
     }).catch(() => {
       exitResolve({ exitCode: 1 });
     });
 
+    const client = this;
+
     return {
       stdout,
       stderr,
+      stdin: {
+        write(data: string | Buffer): void {
+          const strData = Buffer.isBuffer(data) ? data.toString("utf-8") : data;
+          if (resolvedSpawnId !== undefined) {
+            client.sendNoReply({ method: "spawn_stdin", sandboxId, spawnId: resolvedSpawnId, data: strData });
+          } else {
+            spawnReady.then(() => {
+              if (resolvedSpawnId !== undefined) {
+                client.sendNoReply({ method: "spawn_stdin", sandboxId, spawnId: resolvedSpawnId, data: strData });
+              }
+            });
+          }
+        },
+        close(): void {},
+      },
+      resize(cols: number, rows: number): void {
+        if (resolvedSpawnId !== undefined) {
+          client.sendNoReply({ method: "spawn_resize", sandboxId, spawnId: resolvedSpawnId, cols, rows });
+        } else {
+          spawnReady.then(() => {
+            if (resolvedSpawnId !== undefined) {
+              client.sendNoReply({ method: "spawn_resize", sandboxId, spawnId: resolvedSpawnId, cols, rows });
+            }
+          });
+        }
+      },
       wait: () => exitPromise,
       kill: () => {},
     };

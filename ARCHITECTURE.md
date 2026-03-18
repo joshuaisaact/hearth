@@ -51,6 +51,15 @@ Guest agent binary that runs inside the VM. Written in Zig, zero-allocation, por
 - **Port 1025** (forward): TCP port forwarding. Host initiates via Firecracker CONNECT protocol. Agent dials guest localhost, relays bidirectionally via poll(). Fork-per-connection.
 - **Port 1026** (transfer): Tar streaming upload/download. Host initiates via CONNECT. Agent fork+exec's busybox tar with vsock fd redirected to stdin/stdout.
 
+#### Interactive shell protocol
+
+The control channel (port 1024) supports an interactive shell mode used by `hearth shell`. The guest agent allocates a PTY via libc `openpty()` and spawns `/bin/bash` attached to it. Two additional host→guest message types extend the protocol:
+
+- **`stdin`**: base64-encoded keystrokes forwarded from the host terminal
+- **`resize`**: terminal dimensions (`cols`, `rows`) sent on SIGWINCH
+
+All PTY output (stdout and stderr merged by the PTY) is streamed back to the host over the same control channel.
+
 ### `src/agent/` (TypeScript — host-side client)
 Host-side client that talks to the guest agent:
 - Control channel: length-prefixed JSON requests over vsock UDS (guest-initiated connection)

@@ -95,6 +95,17 @@ npx hearth lima setup
 
 Creates a Lima VM with nested KVM, provisions it, runs `hearth setup` inside. Takes ~3-5 minutes on first run.
 
+## Interactive Shell
+
+`hearth shell` drops you into a live bash session inside a sandbox:
+
+```bash
+hearth shell                    # boot from base snapshot
+hearth shell my-project-ready   # boot from a named snapshot
+```
+
+On macOS, the daemon is auto-detected via `~/.hearth/daemon.sock`. The host terminal is set to raw mode — keystrokes are forwarded directly, Ctrl-C/Ctrl-D work as expected, and window resizes propagate via SIGWINCH.
+
 ## API
 
 ### `Sandbox.create()`

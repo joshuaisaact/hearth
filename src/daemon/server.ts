@@ -37,6 +37,10 @@ interface DaemonRequest {
   hostPath?: string;
   guestPath?: string;
   guestPort?: number;
+  spawnId?: number;
+  data?: string;
+  cols?: number;
+  rows?: number;
 }
 
 interface ActiveSandbox {
@@ -154,6 +158,24 @@ async function handleMessage(
       });
 
       return { ok: true, spawnId };
+    }
+
+    case "spawn_stdin": {
+      const active = getSandbox(sandboxes, requireStr(msg.sandboxId, "sandboxId"));
+      const spawnId = requireNum(msg.spawnId, "spawnId");
+      const handle = active.spawns.get(spawnId);
+      if (!handle) throw new Error(`Spawn ${spawnId} not found`);
+      handle.stdin.write(requireStr(msg.data, "data"));
+      return { ok: true };
+    }
+
+    case "spawn_resize": {
+      const active = getSandbox(sandboxes, requireStr(msg.sandboxId, "sandboxId"));
+      const spawnId = requireNum(msg.spawnId, "spawnId");
+      const handle = active.spawns.get(spawnId);
+      if (!handle) throw new Error(`Spawn ${spawnId} not found`);
+      handle.resize(requireNum(msg.cols, "cols"), requireNum(msg.rows, "rows"));
+      return { ok: true };
     }
 
     case "writeFile": {
