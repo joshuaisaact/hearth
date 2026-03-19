@@ -53,28 +53,28 @@ wsl --install && wsl            # one-time
 npx hearth setup
 ```
 
-**macOS** — use a remote Linux host. Firecracker requires KVM which is not available on macOS. Connect to a Linux server running `hearth daemon`:
+**macOS** — use a remote Linux host. Firecracker requires KVM which is not available on macOS. Connect to a Linux server running `hearth daemon` over WebSocket:
 
 ```bash
 # On your Linux server
 npx hearth setup
-hearth daemon
+hearth daemon --remote   # starts UDS + WebSocket listener, prints token
 
-# From macOS, SSH tunnel the daemon socket
-ssh -L ~/.hearth/daemon.sock:/home/user/.hearth/daemon.sock user@server
+# On your Mac, save the connection
+hearth connect <server-ip> --token <token>
 ```
 
-Then use `DaemonClient`:
+That's it. `hearth shell`, `DaemonClient`, and the SDK all auto-resolve the remote connection via `~/.hearthrc`:
 
 ```typescript
 import { DaemonClient } from "hearth";
 
 const client = new DaemonClient();
-await client.connect();                     // connects via ~/.hearth/daemon.sock
+await client.connect();                     // reads ~/.hearthrc, connects via ws://
 const sandbox = await client.create();      // same API as Sandbox
 ```
 
-A Hetzner bare-metal server (~$35/mo) can serve an entire team via the daemon.
+Works over any network where the Mac can reach the server (ZeroTier, Tailscale, LAN, etc.). A Hetzner bare-metal server (~$35/mo) can serve an entire team.
 
 ## Setup
 
@@ -93,7 +93,7 @@ hearth shell                    # boot from base snapshot
 hearth shell my-project-ready   # boot from a named snapshot
 ```
 
-On macOS, the daemon is auto-detected via `~/.hearth/daemon.sock`. The host terminal is set to raw mode — keystrokes are forwarded directly, Ctrl-C/Ctrl-D work as expected, and window resizes propagate via SIGWINCH.
+The daemon is auto-started if not already running. On macOS with `~/.hearthrc` configured, it connects to the remote daemon over WebSocket. The host terminal is set to raw mode — keystrokes are forwarded directly, Ctrl-C/Ctrl-D work as expected, and window resizes propagate via SIGWINCH.
 
 ## API
 
@@ -238,8 +238,11 @@ Host                                      Guest (Firecracker microVM)
 src/                    TypeScript SDK
   sandbox/sandbox.ts    Sandbox class (create, exec, spawn, snapshot, forwardPort, etc.)
   agent/client.ts       Host-side vsock agent client (control channel)
-  daemon/server.ts      Daemon for macOS/multi-process (hearth daemon)
+  daemon/server.ts      Daemon server (UDS + optional WebSocket)
   daemon/client.ts      DaemonClient + RemoteSandbox (same API as Sandbox)
+  daemon/transport.ts   Transport interface (UDS length-prefixed, WS text frames)
+  daemon/ws-server.ts   WebSocket listener with Bearer token auth
+  daemon/config.ts      ~/.hearthrc config resolution + env var overrides
   claude.ts             ClaudeSandbox helper (pre-installed Claude Code + runtime auth)
   network/proxy.ts      HTTP CONNECT proxy for internet access over vsock
   vm/api.ts             Firecracker REST API client

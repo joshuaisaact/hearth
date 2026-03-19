@@ -1,6 +1,6 @@
 # Design Doc: Guest Agent Protocol
 
-**Status**: Partial (language decided, protocol draft)
+**Status**: Implemented
 **Author**: —
 **Last updated**: 2026-03-16
 
@@ -32,7 +32,7 @@ Host (SDK/Daemon)                    Guest (Agent)
      │◄───────────────────────────────────│
 ```
 
-The guest agent listens on a well-known vsock port (52). The host initiates all connections.
+The guest agent connects outbound to the host on vsock port 1024 (host listens on a UDS that Firecracker proxies). Auxiliary listeners on ports 1025-1027 handle port forwarding, tar transfers, and HTTP proxy.
 
 ## Wire Protocol
 
@@ -47,74 +47,59 @@ Length-prefixed JSON messages over the vsock stream.
 └──────────┴──────────────────┘
 ```
 
-### Request Types
+### Request Types (implemented)
+
+All requests use `"method"` to identify the operation. Responses are `{"ok":true,...}` or `{"ok":false,"error":"..."}`. Data fields use base64 encoding.
 
 #### `exec`
-Execute a command in the guest.
+Execute a command synchronously. Returns after the process exits.
 
 ```json
-{
-  "type": "exec",
-  "id": "req_001",
-  "command": ["ls", "-la", "/"],
-  "cwd": "/home/user",
-  "env": {"FOO": "bar"},
-  "timeout_ms": 30000
-}
+{"method": "exec", "cmd": "ls -la /", "timeout": 30}
 ```
 
-Response: streamed stdout/stderr chunks, then a final status message.
+Response (single message):
+```json
+{"ok": true, "exit_code": 0, "stdout": "<base64>", "stderr": "<base64>"}
+```
+
+#### `spawn`
+Spawn a long-running process with streaming output. Non-interactive spawns use pipe-based stdout/stderr capture. Interactive spawns allocate a PTY.
 
 ```json
-{"type": "stdout", "id": "req_001", "data": "total 64\n..."}
-{"type": "stderr", "id": "req_001", "data": ""}
-{"type": "exit", "id": "req_001", "code": 0}
+{"method": "spawn", "cmd": "/bin/bash", "interactive": true, "cols": 80, "rows": 24}
+```
+
+No ok response — the agent enters a streaming loop immediately. Stream messages:
+```json
+{"type": "stdout", "data": "<base64>"}
+{"type": "stderr", "data": "<base64>"}
+{"type": "exit", "code": 0}
+```
+
+Host→agent messages during an interactive spawn:
+```json
+{"type": "stdin", "data": "<base64>"}
+{"type": "resize", "cols": 120, "rows": 40}
 ```
 
 #### `write_file`
-Write content to a file in the guest.
-
 ```json
-{
-  "type": "write_file",
-  "id": "req_002",
-  "path": "/tmp/script.py",
-  "content": "cHJpbnQoJ2hlbGxvJyk=",
-  "encoding": "base64",
-  "mode": "0755"
-}
+{"method": "write_file", "path": "/tmp/script.py", "data": "<base64>", "mode": 493}
 ```
 
 #### `read_file`
-Read a file from the guest.
-
 ```json
-{
-  "type": "read_file",
-  "id": "req_003",
-  "path": "/etc/hostname"
-}
+{"method": "read_file", "path": "/etc/hostname"}
 ```
+Response: `{"ok": true, "data": "<base64>"}`
 
-#### `health`
-Check if the agent is ready.
-
+#### `ping`
+Health check.
 ```json
-{
-  "type": "health",
-  "id": "req_004"
-}
+{"method": "ping"}
 ```
-
-Response:
-```json
-{
-  "type": "health_ok",
-  "id": "req_004",
-  "uptime_ms": 1234,
-  "load": [0.1, 0.05, 0.01]
-}
-```
+Response: `{"ok": true}`
 
 ## Guest Agent Implementation
 
@@ -124,11 +109,11 @@ The guest agent is written in Zig and compiled as a single static binary (`heart
 
 ### Constraints
 
-- Single static binary, no runtime dependencies, no libc
-- < 1MB on disk (flint's agent is ~500KB)
-- < 1MB RSS at runtime
+- Single static binary, links libc (needed for `openpty`, `ioctl`)
+- ~2.3MB on disk
+- < 3MB RSS at runtime
 - Zero dynamic allocation — all buffers are static, sized at compile time
-- Starts as PID 1 or via init system
+- Runs as a service inside the guest (started by init)
 
 ### Design (ported from flint)
 
@@ -164,14 +149,29 @@ Two modes:
 
 The agent lives in `agent/` at the repo root, separate from the TypeScript SDK in `src/`. Built with Zig's cross-compilation targeting `x86_64-linux` (and `aarch64-linux`). The compiled binary is checked into `agent/bin/` or downloaded during `npx hearth setup`.
 
+### Multi-port architecture
+
+The agent uses four vsock ports:
+
+| Port | Purpose | Connection model |
+|------|---------|-----------------|
+| 1024 | Control (exec, spawn, file I/O, ping) | Agent connects outbound to host |
+| 1025 | Port forwarding (TCP relay) | Host connects via Firecracker CONNECT |
+| 1026 | Tar transfer (upload/download) | Host connects via Firecracker CONNECT |
+| 1027 | HTTP proxy bridge (internet access) | Guest TCP 127.0.0.1:3128 → host vsock |
+
+Ports 1025-1027 are forked listener processes, restarted on each snapshot restore reconnect.
+
 ## Multiplexing
 
-v0.1 is single-threaded and synchronous — one request at a time. This matches flint's model and is sufficient for most agent workloads (send command, wait for result).
+The control channel is single-threaded and synchronous — one request at a time. The `spawn` method blocks the command loop for the duration of the spawned process (streaming events are sent inline). This is sufficient because the daemon server maintains one agent connection per sandbox, and the daemon's serial message queue prevents concurrent requests.
 
-If we need concurrent exec in the future, we add request ID correlation and a simple event loop. The wire protocol already includes `id` fields to support this without a breaking change.
+## Known issues
 
-## Open Questions
+### vsock POLLIN not reliable in Firecracker guests
 
-1. **Binary protocol vs JSON**: JSON is debuggable but has overhead for large file transfers. Should we support a binary mode for bulk data? (Flint uses base64 in JSON — simple but ~33% overhead on binary data.)
-2. **Authentication**: Do we need auth on the vsock channel? It's host-local, but in daemon mode multiple users might share a host.
-3. **Agent binary distribution**: Check compiled binary into git (simple, reproducible) or build from source during `npx hearth setup` (requires Zig toolchain)?
+Firecracker's virtio-vsock implementation doesn't reliably trigger `POLLIN` in the guest kernel's `poll()` syscall. This means `poll()` on a vsock socket fd can return 0 (timeout) even when data is available to read. Blocking `read()` works correctly.
+
+**Impact**: The interactive spawn poll loop couldn't detect incoming stdin/resize messages from the host.
+
+**Workaround**: The interactive poll loop sets the vsock socket to `O_NONBLOCK` and tries a non-blocking `read()` on every poll iteration (50ms), regardless of `poll()` revents. If the read returns `EAGAIN`, no data is available — the loop continues. PTY master output is still detected normally via `poll()` since PTY fds don't have this issue.

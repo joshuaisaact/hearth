@@ -50,108 +50,72 @@ npx hearth setup
 
 Near-native. WSL2 is a real Linux kernel, not emulation. Firecracker inside WSL2 performs identically to bare metal Linux.
 
-## macOS — M3+ via Lima
+## macOS — Remote Daemon via WebSocket
 
-### How it works
-
-Lima runs a Linux VM using Apple's Virtualization.framework with `nestedVirtualization: true`. This exposes `/dev/kvm` inside the Linux guest, allowing Firecracker to run.
-
-**Requires**: Apple Silicon M3 or newer, macOS 15 (Sequoia) or later. Apple added nested virtualization support to the Virtualization.framework starting with the M3 chip. M1 and M2 Macs cannot do this.
+Firecracker requires KVM, which is not available on macOS. The recommended approach is connecting to a remote Linux host running the Hearth daemon over WebSocket. This works on all Macs (M1, M2, M3, M4, Intel).
 
 ### Setup
 
 ```bash
-brew install lima
-
-# Create a Lima instance with nested KVM
-limactl create --name hearth --set '.nestedVirtualization=true' template://default
-limactl start hearth
-
-# Enter the Lima VM
-limactl shell hearth
-
-# Install dependencies inside the VM
-# (Node.js, Docker, Zig)
+# On the Linux server
 npx hearth setup
+hearth daemon --remote
+# Prints: ws://0.0.0.0:9100, token, and ~/.hearthrc template
+
+# On the Mac
+hearth connect <server-ip> --token <token>
+# Saves to ~/.hearthrc — all commands auto-resolve from here
 ```
 
-### Daemon mode for transparent access
-
-For a seamless experience, run the Hearth daemon inside the Lima VM. The daemon listens on `~/.hearth/daemon.sock`, which is accessible from macOS via Lima's shared filesystem mount:
+Everything works transparently after this:
 
 ```bash
-# Inside Lima VM
-hearth daemon &
+hearth shell                    # interactive bash over WebSocket
+hearth shell claude-base        # restore a named snapshot
+```
 
-# From macOS — connect to the daemon
-import { DaemonClient } from "hearth/daemon";
+```typescript
+import { DaemonClient } from "hearth";
+
 const client = new DaemonClient();
-await client.connect("~/.hearth/daemon.sock");
-const sandbox = await client.create();
+await client.connect();                  // reads ~/.hearthrc automatically
+const sandbox = await client.create();   // same API as local
 ```
 
-### Shared filesystem
+### Connection config
 
-Lima mounts `~` (home directory) into the VM by default. Add `~/.hearth` as a writable mount:
+`~/.hearthrc` (JSON):
 
-```yaml
-# ~/.lima/hearth/lima.yaml
-mounts:
-  - location: "~/.hearth"
-    writable: true
+```json
+{ "host": "10.147.20.5", "port": 9100, "token": "a3f8c2..." }
 ```
 
-This means:
-- Snapshots are accessible from both macOS and the Lima VM
-- The daemon socket is accessible from macOS
-- Upload/download paths must be within the mounted area
+Resolution order: env vars (`HEARTH_HOST`, `HEARTH_PORT`, `HEARTH_TOKEN`) → `~/.hearthrc` → local UDS socket.
 
-### Performance
+### Auth model
 
-- VM overhead: ~5% (Virtualization.framework is near-native)
-- Nested KVM overhead: ~10-20% for CPU-bound workloads
-- Firecracker boot time: ~150ms (slightly slower than bare metal ~125ms)
-- Shared filesystem: virtiofs, good performance for most operations
+Shared token (64 hex chars), generated automatically on first `hearth daemon --remote`. Validated in the HTTP upgrade handler before the WebSocket handshake completes. For LAN/VPN use (ZeroTier, Tailscale), plaintext token over WS is sufficient since the network layer is already encrypted.
 
-### Chip support
+### Network options
 
-| Chip | Nested KVM | Status |
-|------|-----------|--------|
-| M1, M1 Pro, M1 Max | No | Use remote daemon |
-| M2, M2 Pro, M2 Max | No | Use remote daemon |
-| M3, M3 Pro, M3 Max | Yes | Full support via Lima |
-| M4, M4 Pro, M4 Max | Yes | Full support via Lima |
-| Intel Mac | No | Use remote daemon |
+| Network | Setup | Latency | Notes |
+|---------|-------|---------|-------|
+| ZeroTier / Tailscale | Flat LAN, direct IP | <5ms | Recommended — simple, no port forwarding |
+| SSH tunnel | `ssh -L 9100:localhost:9100 user@server` | 10-30ms | Fallback if VPN not available |
+| Direct internet | Open port 9100 | Varies | Use only with token auth + firewall |
 
-As of late 2025, ~40-55% of Mac developers have M3+ chips. This percentage is growing as M1/M2 machines age out.
+### Port forwarding
 
-## macOS — M1/M2 via Remote Daemon
-
-M1/M2 Macs cannot run Firecracker locally. The recommended approach is connecting to a remote Linux host running the Hearth daemon.
-
-### Setup
-
-```bash
-# On a Linux server (e.g., Hetzner bare metal ~$35/mo)
-npx hearth setup
-hearth daemon
-
-# On the Mac, SSH tunnel the daemon socket
-ssh -L ~/.hearth/daemon.sock:/home/user/.hearth/daemon.sock user@server
-
-# From macOS
-import { DaemonClient } from "hearth/daemon";
-const client = new DaemonClient();
-await client.connect("~/.hearth/daemon.sock");
-```
+When connected remotely, `sandbox.forwardPort()` binds on `0.0.0.0` (not `127.0.0.1`) on the server, and the client automatically replaces the returned host address with the server's IP from the WebSocket URL. On ZeroTier/Tailscale the forwarded port is directly reachable from the Mac.
 
 ### Latency
 
 | Scenario | Round-trip | Experience |
 |----------|-----------|------------|
-| Same region (US East → US East) | 10-30ms | Excellent |
+| Same LAN / ZeroTier | <5ms | Identical to local |
+| Same region cloud | 10-30ms | Excellent |
 | Same continent | 30-80ms | Good |
-| Cross-continent | 100-200ms | Usable for most workflows |
+| Cross-continent | 100-200ms | Usable for agent workloads |
 
 For agent workloads (programmatic API calls, not interactive), even 100ms latency is acceptable since operations are batched.
 
@@ -161,9 +125,13 @@ For agent workloads (programmatic API calls, not interactive), even 100ms latenc
 |----------|-------|---------|-------|
 | Hetzner AX41-NVMe | 6-core, 64GB | ~$44/mo | Shared among team |
 | Hetzner AX52 | 8-core, 64GB | ~$53/mo | More CPU |
-| AWS EC2 metal | Variable | ~$3,500/mo | Expensive |
+| Home server | Any x86 + KVM | Free | Best latency on LAN |
 
-A single Hetzner server can serve an entire team via the daemon.
+A single server can serve an entire team via the daemon.
+
+### Limitations
+
+- `upload()` / `download()` pass local `hostPath` to the daemon — these don't work over remote connections (the daemon can't access the Mac's filesystem). Use `writeFile()` / `readFile()` for small files. Streaming tar over WS is planned as a follow-up.
 
 ## Future: libkrun Backend
 
