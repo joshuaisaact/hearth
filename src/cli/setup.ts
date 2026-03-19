@@ -31,7 +31,7 @@ function fcArch(): string {
   throw new Error(`Unsupported architecture: ${a}`);
 }
 
-const AGENT_VERSION = "agent-v0.2.0";
+const AGENT_VERSION = "agent-v0.3.0";
 const GITHUB_REPO = "joshuaisaact/hearth";
 
 async function main() {
