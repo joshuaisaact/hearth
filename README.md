@@ -244,6 +244,7 @@ src/                    TypeScript SDK
   daemon/ws-server.ts   WebSocket listener with Bearer token auth
   daemon/config.ts      ~/.hearthrc config resolution + env var overrides
   claude.ts             ClaudeSandbox helper (pre-installed Claude Code + runtime auth)
+  cli/claude.ts         `hearth claude` — interactive Claude Code in a sandbox
   network/proxy.ts      HTTP CONNECT proxy for internet access over vsock
   vm/api.ts             Firecracker REST API client
   vm/snapshot.ts        Base snapshot creation and management
@@ -268,22 +269,32 @@ docs/                   Specs, design docs, references
 
 The primary use case — run an AI agent with full autonomy in a safe, isolated environment. `--dangerously-skip-permissions` is actually safe because the sandbox *is* the permission boundary.
 
-### Quick start
+### Quick start (CLI)
 
 1. Create the `claude-base` snapshot (one-time, ~2 minutes):
 
 ```bash
-# Generate an OAuth token (valid for 1 year)
-claude setup-token
-# Save it to .env
-echo "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-..." > .env
-
-# Build the snapshot
-node --experimental-strip-types examples/create-claude-snapshot.ts --daemon  # macOS
 node --experimental-strip-types examples/create-claude-snapshot.ts           # Linux
+node --experimental-strip-types examples/create-claude-snapshot.ts --daemon  # macOS
 ```
 
-2. Use `ClaudeSandbox` to run prompts:
+2. Launch Claude Code in a sandbox:
+
+```bash
+hearth claude
+```
+
+That's it. Restores the snapshot in ~200ms, injects your host's Claude Code credentials, enables internet, and drops you into an interactive Claude Code session inside an isolated VM. Your host credentials are read from `~/.claude/.credentials.json` — no manual token setup required.
+
+You can also pass CLI args through:
+
+```bash
+hearth claude -p "Build a REST API with Express"   # non-interactive
+```
+
+### Programmatic API
+
+Use `ClaudeSandbox` for scripted/automated use:
 
 ```typescript
 import { DaemonClient, ClaudeSandbox, CLAUDE_SNAPSHOT_NAME } from "hearth";
@@ -298,12 +309,17 @@ const claude = ClaudeSandbox.create(sandbox);
 const result = await claude.prompt("Build a REST API with Express");
 console.log(result.stdout);
 
+// Or stream output in real time
+const handle = await claude.promptStream("Write and test a hello world");
+handle.stdout.on("data", (data) => process.stdout.write(data));
+await handle.wait();
+
 // Pull the results out
 await sandbox.download("/home/agent", "./output");
 await claude.destroy();
 ```
 
-The `claude-base` snapshot has Claude Code pre-installed but no credentials — the OAuth token is passed at runtime via `CLAUDE_CODE_OAUTH_TOKEN`. The snapshot is shareable.
+The `claude-base` snapshot has Claude Code pre-installed but no credentials — auth is injected at runtime from your host. The snapshot is shareable.
 
 See [examples/claude-in-sandbox.ts](examples/claude-in-sandbox.ts) for a complete working example.
 

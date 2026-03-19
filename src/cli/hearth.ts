@@ -62,6 +62,9 @@ if (command === "setup") {
   if (!token && !config.token) {
     console.log("Note: no token set. Use --token <token> or edit ~/.hearthrc");
   }
+} else if (command === "claude") {
+  const { claudeCommand } = await import("./claude.js");
+  await claudeCommand(process.argv.slice(3));
 } else if (command === "shell") {
   const { shellCommand } = await import("./shell.js");
   await shellCommand(process.argv.slice(3));
@@ -94,6 +97,7 @@ if (command === "setup") {
   console.log("");
   console.log("Commands:");
   console.log("  setup    Download and configure all dependencies");
+  console.log("  claude   Launch Claude Code in an isolated sandbox");
   console.log("  shell    Start an interactive shell in a sandbox");
   console.log("  daemon   Start the Hearth daemon (for multi-process/remote access)");
   console.log("  connect  Configure remote daemon connection (hearth connect <host>)");

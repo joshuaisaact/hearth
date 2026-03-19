@@ -79,22 +79,16 @@ export class ClaudeSandbox {
   }
 
   /** Run a prompt with streaming output. */
-  promptStream(prompt: string, opts?: ClaudeExecOptions & SpawnOptions): SpawnHandle {
+  async promptStream(prompt: string, opts?: ClaudeExecOptions & SpawnOptions): Promise<SpawnHandle> {
     const script = this.buildScript(prompt, opts);
 
-    // Write script synchronously via exec, then spawn
-    // We can't await in a sync method, so chain it
-    const sandbox = this.sandbox;
-    const writePromise = sandbox.writeFile("/tmp/claude-run.sh", script)
-      .then(() => sandbox.exec("chmod +x /tmp/claude-run.sh"));
+    await this.sandbox.writeFile("/tmp/claude-run.sh", script);
+    await this.sandbox.exec("chmod +x /tmp/claude-run.sh");
 
-    // Return a SpawnHandle that starts after the script is written
-    const handle = sandbox.spawn(
+    return this.sandbox.spawn(
       `su - ${AGENT_USER} -s /bin/sh -c /tmp/claude-run.sh`,
-      { timeout: opts?.timeout ? opts.timeout / 1000 : 300 },
+      { timeout: opts?.timeout ? opts.timeout / 1000 : 300, interactive: true },
     );
-
-    return handle;
   }
 
   /** Get the underlying sandbox for direct operations. */
@@ -129,7 +123,7 @@ export class ClaudeSandbox {
       "#!/bin/bash",
       ...envLines,
       `cd '${cwd.replace(/'/g, "'\\''")}'`,
-      `exec claude -p '${escapedPrompt}' --dangerously-skip-permissions ${flags.join(" ")}`,
+      `exec claude -p '${escapedPrompt}' --dangerously-skip-permissions --output-format stream-json --verbose ${flags.join(" ")}`,
     ].join("\n");
   }
 }

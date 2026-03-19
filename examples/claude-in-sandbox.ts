@@ -60,19 +60,54 @@ async function main() {
   // 2. Wrap it with ClaudeSandbox
   const claude = ClaudeSandbox.create(sandbox);
 
-  // 3. Give it a task
+  // 3. Give it a task (streaming)
   console.log("\n=== Asking Claude to write and test code ===\n");
 
-  const result = await claude.prompt(
+  const handle = await claude.promptStream(
     "Create a file called hello.js that exports a greet(name) function returning " +
     "'Hello, <name>!'. If run directly, call greet('World') and print the result. " +
     "Then create hello.test.js using Node's built-in test runner, and run the tests.",
     { timeout: 120000 },
   );
 
-  console.log(result.stdout);
-  if (result.exitCode !== 0) {
-    console.error("Claude exited with code", result.exitCode);
+  // Parse stream-json events and render them
+  let lineBuf = "";
+  handle.stdout.on("data", (data: string) => {
+    lineBuf += data;
+    const lines = lineBuf.split("\n");
+    lineBuf = lines.pop()!; // keep incomplete line in buffer
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line);
+        if (event.type === "assistant") {
+          // Stream text content from assistant messages
+          for (const block of event.message?.content ?? []) {
+            if (block.type === "text") process.stdout.write(block.text);
+            if (block.type === "tool_use") {
+              process.stdout.write(`\n[tool: ${block.name}]\n`);
+              if (typeof block.input === "object") {
+                const preview = JSON.stringify(block.input).slice(0, 200);
+                process.stdout.write(preview + "\n");
+              }
+            }
+          }
+        } else if (event.type === "tool_result") {
+          process.stdout.write(`[result: ${(event.content ?? "").toString().slice(0, 300)}]\n`);
+        } else if (event.type === "result") {
+          process.stdout.write(`\n\n--- Done (${event.duration_ms}ms) ---\n`);
+        }
+      } catch {
+        // Not JSON, print raw
+        process.stdout.write(line + "\n");
+      }
+    }
+  });
+  handle.stderr.on("data", (data: string) => process.stderr.write(data));
+
+  const { exitCode } = await handle.wait();
+  if (exitCode !== 0) {
+    console.error("\nClaude exited with code", exitCode);
   }
 
   // 4. Check what Claude created

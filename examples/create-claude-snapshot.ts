@@ -33,6 +33,9 @@ async function main() {
 
   await sandbox.exec("useradd -m -s /bin/bash agent 2>/dev/null || true");
 
+  // Ensure localhost resolves (needed for Claude Code OAuth callback)
+  await sandbox.exec("grep -q localhost /etc/hosts || echo '127.0.0.1 localhost' >> /etc/hosts");
+
   console.log("Installing Claude Code...");
   const install = await sandbox.exec(
     "npm install -g @anthropic-ai/claude-code 2>&1 | tail -3",
