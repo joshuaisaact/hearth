@@ -62,6 +62,15 @@ if (command === "setup") {
   if (!token && !config.token) {
     console.log("Note: no token set. Use --token <token> or edit ~/.hearthrc");
   }
+} else if (command === "build") {
+  const { buildCommand } = await import("./build.js");
+  await buildCommand(process.argv.slice(3));
+} else if (command === "rebuild") {
+  const { rebuildCommand } = await import("./build.js");
+  await rebuildCommand(process.argv.slice(3));
+} else if (command === "envs") {
+  const { envsCommand } = await import("./envs.js");
+  envsCommand(process.argv.slice(3));
 } else if (command === "claude") {
   const { claudeCommand } = await import("./claude.js");
   await claudeCommand(process.argv.slice(3));
@@ -97,6 +106,9 @@ if (command === "setup") {
   console.log("");
   console.log("Commands:");
   console.log("  setup    Download and configure all dependencies");
+  console.log("  build    Build an environment from a Hearthfile.toml");
+  console.log("  rebuild  Rebuild an existing environment from scratch");
+  console.log("  envs     List, inspect, or remove environments");
   console.log("  claude   Launch Claude Code in an isolated sandbox");
   console.log("  shell    Start an interactive shell in a sandbox");
   console.log("  daemon   Start the Hearth daemon (for multi-process/remote access)");

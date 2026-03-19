@@ -1,0 +1,7 @@
+name = "test-env"
+repo = "github.com/expressjs/express"
+
+setup = [
+  "npm install",
+  "npm install -g @anthropic-ai/claude-code",
+]

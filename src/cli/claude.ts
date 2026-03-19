@@ -1,16 +1,27 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
 import { CLAUDE_SNAPSHOT_NAME } from "../claude.js";
+import { DaemonClient } from "../daemon/client.js";
+import { resolveConnection } from "../daemon/config.js";
+import { isEnvironment } from "../environment/metadata.js";
+import { startEnvironment } from "../environment/start.js";
 import type { SpawnHandle } from "../agent/client.js";
+import type { ExecResult } from "../sandbox/types.js";
 
 interface SandboxLike {
-  exec(command: string, opts?: { timeout?: number }): Promise<{ stdout: string; stderr: string; exitCode: number }>;
+  exec(command: string, opts?: { cwd?: string; timeout?: number }): Promise<ExecResult>;
   spawn(command: string, opts: { interactive: boolean; cols: number; rows: number; timeout?: number }): SpawnHandle;
   writeFile(path: string, content: string | Buffer): Promise<void>;
   enableInternet(): Promise<void>;
+  forwardPort(guestPort: number): Promise<{ host: string; port: number }>;
   destroy(): Promise<void>;
 }
+
+const DAEMON_SOCK = join(homedir(), ".hearth", "daemon.sock");
 
 function loadCredentials(): string {
   const credPath = join(homedir(), ".claude", ".credentials.json");
@@ -22,63 +33,84 @@ function loadCredentials(): string {
   return readFileSync(credPath, "utf-8");
 }
 
+async function tryConnect(path: string): Promise<DaemonClient | null> {
+  const client = new DaemonClient();
+  try {
+    await client.connect(path);
+    return client;
+  } catch {
+    return null;
+  }
+}
+
+async function ensureDaemon(): Promise<DaemonClient> {
+  let client = await tryConnect(DAEMON_SOCK);
+  if (client) return client;
+
+  const hearthBin = join(dirname(fileURLToPath(import.meta.url)), "hearth.js");
+  const child = spawn(process.execPath, [hearthBin, "daemon"], {
+    stdio: "ignore",
+    detached: true,
+  });
+  child.unref();
+
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    client = await tryConnect(DAEMON_SOCK);
+    if (client) return client;
+  }
+  throw new Error("Failed to start daemon");
+}
+
 export async function claudeCommand(args: string[]): Promise<void> {
   const credentials = loadCredentials();
 
-  const { resolveConnection } = await import("../daemon/config.js");
-  const { DaemonClient } = await import("../daemon/client.js");
-
-  const DAEMON_SOCK = join(homedir(), ".hearth", "daemon.sock");
-
-  async function tryConnect(path: string): Promise<InstanceType<typeof DaemonClient> | null> {
-    const client = new DaemonClient();
-    try {
-      await client.connect(path);
-      return client;
-    } catch {
-      return null;
-    }
-  }
-
-  async function ensureDaemon(): Promise<InstanceType<typeof DaemonClient>> {
-    let client = await tryConnect(DAEMON_SOCK);
-    if (client) return client;
-
-    const { spawn } = await import("node:child_process");
-    const { dirname } = await import("node:path");
-    const { fileURLToPath } = await import("node:url");
-    const hearthBin = join(dirname(fileURLToPath(import.meta.url)), "hearth.js");
-    const child = spawn(process.execPath, [hearthBin, "daemon"], {
-      stdio: "ignore",
-      detached: true,
-    });
-    child.unref();
-
-    for (let i = 0; i < 30; i++) {
-      await new Promise((r) => setTimeout(r, 100));
-      client = await tryConnect(DAEMON_SOCK);
-      if (client) return client;
-    }
-    throw new Error("Failed to start daemon");
-  }
-
-  // Restore the claude-base snapshot
-  console.log("Restoring Claude Code sandbox...");
   const target = resolveConnection();
   const client = target.type === "ws"
     ? await (async () => { const c = new DaemonClient(); await c.connect(); return c; })()
     : await ensureDaemon();
 
+  // Determine snapshot: first non-flag arg could be an environment name
+  let envName: string | undefined;
+  let claudeArgs: string[] = [];
+
+  // Split args at "--" if present, otherwise check first arg
+  const dashDash = args.indexOf("--");
+  if (dashDash !== -1) {
+    envName = args.slice(0, dashDash)[0];
+    claudeArgs = args.slice(dashDash + 1);
+  } else if (args.length > 0 && !args[0].startsWith("-")) {
+    // Check if first arg is an environment name
+    const snapDir = join(homedir(), ".hearth", "snapshots", args[0]);
+    if (existsSync(snapDir) && isEnvironment(snapDir)) {
+      envName = args[0];
+      claudeArgs = args.slice(1);
+    } else {
+      // Not an environment — treat all args as claude args
+      claudeArgs = args;
+    }
+  } else {
+    claudeArgs = args;
+  }
+
+  const snapshotName = envName ?? CLAUDE_SNAPSHOT_NAME;
+
+  console.log(envName
+    ? `Restoring Claude Code in environment "${envName}"...`
+    : "Restoring Claude Code sandbox...");
+
   let sandbox: SandboxLike;
   try {
     console.time("restore");
-    sandbox = await client.fromSnapshot(CLAUDE_SNAPSHOT_NAME) as unknown as SandboxLike;
+    sandbox = await client.fromSnapshot(snapshotName) as unknown as SandboxLike;
     console.timeEnd("restore");
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("not found") || msg.includes("does not exist")) {
-      console.error(`Snapshot "${CLAUDE_SNAPSHOT_NAME}" not found.`);
-      console.error("Create it first: npx hearth snapshot-claude");
+      console.error(`Snapshot "${snapshotName}" not found.`);
+      if (!envName) {
+        console.error("Create it first: npx hearth snapshot-claude");
+      }
     } else {
       console.error("Failed to restore snapshot:", msg);
     }
@@ -87,8 +119,47 @@ export async function claudeCommand(args: string[]): Promise<void> {
 
   await sandbox.enableInternet();
 
+  // Run environment start phase if this is an environment
+  let workdir = "/home/agent";
+  if (envName) {
+    try {
+      const result = await startEnvironment({ name: envName, sandbox });
+      workdir = result.workdir;
+    } catch (err) {
+      console.error(`Warning: start phase failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
   // Ensure localhost resolves (needed for Claude Code OAuth callback)
   await sandbox.exec("grep -q localhost /etc/hosts || echo '127.0.0.1 localhost' >> /etc/hosts");
+
+  // Ensure Claude Code is installed (environments don't have it by default)
+  const hasClaudeCode = await sandbox.exec("which claude");
+  if (hasClaudeCode.exitCode !== 0) {
+    console.log("Installing Claude Code...");
+    const install = await sandbox.exec(
+      "npm install -g @anthropic-ai/claude-code 2>&1",
+      { timeout: 180_000 },
+    );
+    if (install.exitCode !== 0) {
+      console.error("Failed to install Claude Code:", install.stderr);
+      process.exit(1);
+    }
+  }
+
+  // Ensure agent user owns their home directory
+  await sandbox.exec("chown -R agent:agent /home/agent");
+
+  // Set up proxy env vars in .bashrc for the agent user
+  const bashrc = [
+    "export PATH=\"$HOME/.claude/bin:$PATH\"",
+    "export HTTP_PROXY=http://127.0.0.1:3128",
+    "export HTTPS_PROXY=http://127.0.0.1:3128",
+    "export http_proxy=http://127.0.0.1:3128",
+    "export https_proxy=http://127.0.0.1:3128",
+  ].join("\n");
+  await sandbox.exec("test -f /home/agent/.bashrc || true");
+  await sandbox.writeFile("/home/agent/.bashrc", bashrc);
 
   // Inject host credentials into the VM
   await sandbox.exec("mkdir -p /home/agent/.claude");
@@ -97,13 +168,13 @@ export async function claudeCommand(args: string[]): Promise<void> {
     skipDangerousModePermissionPrompt: true,
   }));
 
-  // Write global config to skip onboarding and trust dialog (Claude Code reads ~/.claude.json)
+  // Write global config to skip onboarding and trust dialog
   const globalConfig = JSON.stringify({
     hasCompletedOnboarding: true,
     theme: "dark",
     numStartups: 1,
     projects: {
-      "/home/agent": {
+      [workdir]: {
         allowedTools: [],
         hasTrustDialogAccepted: true,
         hasCompletedProjectOnboarding: true,
@@ -112,17 +183,17 @@ export async function claudeCommand(args: string[]): Promise<void> {
     },
   });
   await sandbox.writeFile("/home/agent/.claude.json", globalConfig);
-  await sandbox.exec("chown -R agent:agent /home/agent/.claude /home/agent/.claude.json");
+  await sandbox.exec("chown -R agent:agent /home/agent");
 
   // Write the startup script
-  const claudeArgs = args.length > 0 ? args.join(" ") : "";
+  const claudeArgsStr = claudeArgs.length > 0 ? claudeArgs.join(" ") : "";
   const script = [
     "#!/bin/bash",
     "export HOME=/home/agent",
     "source $HOME/.bashrc",
-    "cd /home/agent",
-    claudeArgs
-      ? `exec claude ${claudeArgs} --dangerously-skip-permissions`
+    `cd ${workdir}`,
+    claudeArgsStr
+      ? `exec claude ${claudeArgsStr} --dangerously-skip-permissions`
       : "exec claude --dangerously-skip-permissions",
   ].join("\n");
 

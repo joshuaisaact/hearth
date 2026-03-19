@@ -8,6 +8,12 @@
 | [Sandbox Lifecycle](sandbox-lifecycle.md) | Draft | Create → use → snapshot → destroy |
 | [Filesystem Operations](filesystem-operations.md) | Draft | File I/O between host and guest |
 
+## In Design
+
+| Spec | Status | Summary |
+|------|--------|---------|
+| [Environments](environments.md) | Draft | Declarative repo+setup+start provisioning, snapshotted for instant restore |
+
 ## Future
 
 | Spec | Status | Summary |

@@ -31,6 +31,8 @@ async function main() {
   await sandbox.enableInternet();
   console.log("Sandbox created with internet");
 
+  // agent user is baked into the standard rootfs since v0.5;
+  // this is a no-op safety net for older rootfs images
   await sandbox.exec("useradd -m -s /bin/bash agent 2>/dev/null || true");
 
   // Ensure localhost resolves (needed for Claude Code OAuth callback)
@@ -38,7 +40,7 @@ async function main() {
 
   console.log("Installing Claude Code...");
   const install = await sandbox.exec(
-    "npm install -g @anthropic-ai/claude-code 2>&1 | tail -3",
+    "curl -fsSL https://cli.anthropic.com/install.sh | sh 2>&1 | tail -5",
     { timeout: 180000 },
   );
   console.log(install.stdout.trim());
