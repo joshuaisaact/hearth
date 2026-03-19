@@ -3,7 +3,9 @@ import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { Sandbox } from "../sandbox/sandbox.js";
 import { getHearthDir } from "../vm/binary.js";
-import { errorMessage, encodeMessage, parseFrames, requireStr, requireNum } from "../util.js";
+import { errorMessage, encodeMessage, requireStr, requireNum } from "../util.js";
+import { UdsTransport, type Transport } from "./transport.js";
+import { startWsListener } from "./ws-server.js";
 import type { SpawnHandle } from "../agent/client.js";
 import type { ExecOptions, SpawnOptions } from "../sandbox/types.js";
 
@@ -48,65 +50,57 @@ interface ActiveSandbox {
   spawns: Map<number, SpawnHandle>;
 }
 
-export function startDaemon(): net.Server {
+export function startDaemon(opts?: { wsPort?: number; wsToken?: string }): net.Server {
   try { unlinkSync(DAEMON_SOCK); } catch {}
 
   const server = net.createServer((conn) => {
-    const sandboxes = new Map<string, ActiveSandbox>();
-    let nextId = 1;
-    let nextSpawnId = 1;
-    const chunks: Buffer[] = [];
-    let totalLen = 0;
-
-    // Serial message queue — process one at a time to prevent races
-    let processing = Promise.resolve();
-
-    conn.on("data", (chunk: Buffer) => {
-      chunks.push(chunk);
-      totalLen += chunk.length;
-
-      const combined = Buffer.concat(chunks);
-      chunks.length = 0;
-      const { messages, remainder } = parseFrames(combined);
-
-      if (remainder.length > 0) {
-        chunks.push(remainder);
-        totalLen = remainder.length;
-      } else {
-        totalLen = 0;
-      }
-
-      for (const json of messages) {
-        processing = processing.then(async () => {
-          let reqId: number | undefined;
-          try {
-            const msg = JSON.parse(json) as DaemonRequest;
-            reqId = typeof msg.reqId === "number" ? msg.reqId : undefined;
-            const response = await handleMessage(msg, sandboxes, () => nextId++, () => nextSpawnId++, conn);
-            sendResponse(conn, { ...response, reqId });
-          } catch (err) {
-            // Try to extract reqId from raw JSON if parse succeeded but handler threw
-            if (reqId === undefined) {
-              const match = json.match(/"reqId"\s*:\s*(\d+)/);
-              if (match) reqId = parseInt(match[1], 10);
-            }
-            sendResponse(conn, { error: errorMessage(err), reqId });
-          }
-        });
-      }
-    });
-
-    conn.on("close", () => {
-      // Clean up all sandboxes owned by this connection
-      for (const [id, active] of sandboxes) {
-        try { active.sandbox.destroySync(); } catch {}
-      }
-      sandboxes.clear();
-    });
+    const transport = new UdsTransport(conn);
+    handleConnection(transport, false);
   });
 
   server.listen(DAEMON_SOCK);
+
+  if (opts?.wsPort !== undefined && opts.wsToken) {
+    startWsListener(opts.wsPort, opts.wsToken, (transport) => {
+      handleConnection(transport, true);
+    });
+  }
+
   return server;
+}
+
+function handleConnection(transport: Transport, isRemote: boolean): void {
+  const sandboxes = new Map<string, ActiveSandbox>();
+  let nextId = 1;
+  let nextSpawnId = 1;
+
+  // Serial message queue — process one at a time to prevent races
+  let processing = Promise.resolve();
+
+  transport.onMessage = (raw: object) => {
+    processing = processing.then(async () => {
+      let reqId: number | undefined;
+      try {
+        const msg = raw as DaemonRequest;
+        reqId = typeof msg.reqId === "number" ? msg.reqId : undefined;
+        const response = await handleMessage(
+          msg, sandboxes, () => nextId++, () => nextSpawnId++,
+          (m) => transport.send(m), isRemote,
+        );
+        transport.send({ ...response, reqId });
+      } catch (err) {
+        transport.send({ error: errorMessage(err), reqId });
+      }
+    });
+  };
+
+  transport.onClose = () => {
+    // Clean up all sandboxes owned by this connection
+    for (const [_id, active] of sandboxes) {
+      try { active.sandbox.destroySync(); } catch {}
+    }
+    sandboxes.clear();
+  };
 }
 
 async function handleMessage(
@@ -114,7 +108,8 @@ async function handleMessage(
   sandboxes: Map<string, ActiveSandbox>,
   allocId: () => number,
   allocSpawnId: () => number,
-  conn: net.Socket,
+  send: (msg: object) => void,
+  isRemote: boolean,
 ): Promise<DaemonResponse> {
   switch (msg.method) {
     case "create": {
@@ -144,16 +139,16 @@ async function handleMessage(
       active.spawns.set(spawnId, handle);
 
       handle.stdout.on("data", (data: string) => {
-        sendResponse(conn, { event: "stdout", spawnId, data });
+        send({ event: "stdout", spawnId, data });
       });
       handle.stderr.on("data", (data: string) => {
-        sendResponse(conn, { event: "stderr", spawnId, data });
+        send({ event: "stderr", spawnId, data });
       });
       handle.wait().then(({ exitCode }) => {
-        sendResponse(conn, { event: "exit", spawnId, exitCode });
+        send({ event: "exit", spawnId, exitCode });
         active.spawns.delete(spawnId);
       }).catch(() => {
-        sendResponse(conn, { event: "exit", spawnId, exitCode: 1 });
+        send({ event: "exit", spawnId, exitCode: 1 });
         active.spawns.delete(spawnId);
       });
 
@@ -204,7 +199,10 @@ async function handleMessage(
 
     case "forwardPort": {
       const active = getSandbox(sandboxes, requireStr(msg.sandboxId, "sandboxId"));
-      const { host, port } = await active.sandbox.forwardPort(requireNum(msg.guestPort, "guestPort"));
+      const bindAddress = isRemote ? "0.0.0.0" : "127.0.0.1";
+      const { host, port } = await active.sandbox.forwardPort(
+        requireNum(msg.guestPort, "guestPort"), bindAddress,
+      );
       return { ok: true, host, port };
     }
 
@@ -253,10 +251,6 @@ function getSandbox(sandboxes: Map<string, ActiveSandbox>, id: string): ActiveSa
   const active = sandboxes.get(id);
   if (!active) throw new Error(`Sandbox "${id}" not found`);
   return active;
-}
-
-function sendResponse(conn: net.Socket, msg: object): void {
-  conn.write(encodeMessage(msg));
 }
 
 export { DAEMON_SOCK };

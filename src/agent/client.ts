@@ -227,7 +227,8 @@ export class AgentClient {
       stdin: {
         write(data: string | Buffer): void {
           const buf = Buffer.isBuffer(data) ? data : Buffer.from(data, "utf-8");
-          socket.write(encodeMessage({ type: "stdin", data: buf.toString("base64") }));
+          const msg = encodeMessage({ type: "stdin", data: buf.toString("base64") });
+          socket.write(msg);
         },
         close(): void {
           // Not currently handled by the guest agent — the child process

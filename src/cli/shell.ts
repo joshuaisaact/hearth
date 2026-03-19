@@ -1,21 +1,60 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { Sandbox } from "../sandbox/sandbox.js";
 import { DaemonClient } from "../daemon/client.js";
+import { resolveConnection } from "../daemon/config.js";
 import type { SpawnHandle } from "../agent/client.js";
+
+const DAEMON_SOCK = join(homedir(), ".hearth", "daemon.sock");
 
 interface SandboxLike {
   spawn(command: string, opts: { interactive: boolean; cols: number; rows: number }): SpawnHandle;
   destroy(): Promise<void>;
 }
 
-async function createSandbox(snapshotName?: string): Promise<{ sandbox: SandboxLike; cleanup: () => void }> {
-  const daemonSock = process.env.HEARTH_DAEMON_SOCK ?? join(homedir(), ".hearth", "daemon.sock");
+/** Try connecting to the daemon. Returns the client on success, null on failure. */
+async function tryConnect(path: string): Promise<DaemonClient | null> {
+  const client = new DaemonClient();
+  try {
+    await client.connect(path);
+    return client;
+  } catch {
+    return null;
+  }
+}
 
-  if (existsSync(daemonSock)) {
+/** Start the daemon as a detached background process and wait until it's connectable. */
+async function ensureDaemon(): Promise<DaemonClient> {
+  // Try existing socket first
+  let client = await tryConnect(DAEMON_SOCK);
+  if (client) return client;
+
+  // Fork the daemon in the background
+  const hearthBin = join(dirname(fileURLToPath(import.meta.url)), "hearth.js");
+  const child = spawn(process.execPath, [hearthBin, "daemon"], {
+    stdio: "ignore",
+    detached: true,
+  });
+  child.unref();
+
+  // Poll until the socket is connectable (up to 3s)
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    client = await tryConnect(DAEMON_SOCK);
+    if (client) return client;
+  }
+
+  throw new Error("Failed to start daemon");
+}
+
+async function createSandbox(snapshotName?: string): Promise<{ sandbox: SandboxLike; cleanup: () => void }> {
+  const target = resolveConnection();
+
+  // Remote WS connection — always use daemon client
+  if (target.type === "ws") {
     const client = new DaemonClient();
-    await client.connect(daemonSock);
+    await client.connect();
     const sandbox = snapshotName
       ? await client.fromSnapshot(snapshotName)
       : await client.create();
@@ -29,14 +68,17 @@ async function createSandbox(snapshotName?: string): Promise<{ sandbox: SandboxL
     };
   }
 
+  // Local — auto-start daemon if needed
+  const client = await ensureDaemon();
   const sandbox = snapshotName
-    ? await Sandbox.fromSnapshot(snapshotName)
-    : await Sandbox.create();
+    ? await client.fromSnapshot(snapshotName)
+    : await client.create();
   return {
     sandbox,
     cleanup: () => {
       if (process.stdin.isTTY) process.stdin.setRawMode(false);
-      sandbox.destroySync();
+      sandbox.destroy().catch(() => {});
+      client.close();
     },
   };
 }

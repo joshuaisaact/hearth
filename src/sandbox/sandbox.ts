@@ -338,7 +338,7 @@ export class Sandbox {
     });
   }
 
-  async forwardPort(guestPort: number): Promise<{ host: string; port: number }> {
+  async forwardPort(guestPort: number, bindAddress = "127.0.0.1"): Promise<{ host: string; port: number }> {
     this.ensureAlive();
 
     return new Promise((resolve, reject) => {
@@ -355,7 +355,7 @@ export class Sandbox {
         }).catch(() => clientConn.destroy());
       });
 
-      tcpServer.listen(0, "127.0.0.1", () => {
+      tcpServer.listen(0, bindAddress, () => {
         const addr = tcpServer.address();
         if (!addr || typeof addr === "string") {
           tcpServer.close();
@@ -363,7 +363,7 @@ export class Sandbox {
           return;
         }
         this.portForwardServers.push(tcpServer);
-        resolve({ host: "127.0.0.1", port: addr.port });
+        resolve({ host: bindAddress, port: addr.port });
       });
 
       tcpServer.on("error", reject);

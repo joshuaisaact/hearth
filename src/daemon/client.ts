@@ -2,16 +2,15 @@ import net from "node:net";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { EventEmitter } from "node:events";
+import WebSocket from "ws";
 import { encodeMessage, parseFrames } from "../util.js";
+import { resolveConnection, type ConnectionTarget } from "./config.js";
+import type { Transport } from "./transport.js";
 import type { ExecResult, ExecOptions, SpawnOptions, SnapshotInfo } from "../sandbox/types.js";
 import type { SpawnHandle } from "../agent/client.js";
 
 const DEFAULT_SOCKET = join(homedir(), ".hearth", "daemon.sock");
 
-/**
- * Client for the Hearth daemon. Provides the same API as the Sandbox class
- * but proxies all operations through a Unix socket to the daemon process.
- */
 /** A parsed JSON response from the daemon. */
 interface DaemonResponse {
   reqId?: number;
@@ -32,7 +31,8 @@ interface DaemonResponse {
 }
 
 export class DaemonClient {
-  private conn: net.Socket | null = null;
+  private transport: Transport | null = null;
+  private remoteHost: string | null = null;
   private pending = new Map<number, {
     resolve: (value: DaemonResponse) => void;
     reject: (err: Error) => void;
@@ -45,36 +45,99 @@ export class DaemonClient {
   private pendingSpawnEvents = new Map<number, DaemonResponse[]>();
   private nextReqId = 1;
 
-  async connect(socketPath: string = DEFAULT_SOCKET): Promise<void> {
+  async connect(target?: string): Promise<void> {
+    if (target !== undefined) {
+      if (target.startsWith("ws://") || target.startsWith("wss://")) {
+        return this.connectWs(target);
+      }
+      return this.connectUds(target);
+    }
+
+    const resolved = resolveConnection();
+    if (resolved.type === "ws") {
+      return this.connectWs(resolved.url, resolved.token);
+    }
+    return this.connectUds(resolved.path);
+  }
+
+  private async connectUds(socketPath: string): Promise<void> {
     return new Promise((resolve, reject) => {
       const conn = net.connect({ path: socketPath });
       conn.once("connect", () => {
-        this.conn = conn;
-        this.startReading();
+        let remainder: Buffer = Buffer.alloc(0);
+
+        this.transport = {
+          send: (msg: object) => conn.write(encodeMessage(msg)),
+          onMessage: null,
+          onClose: null,
+          close: () => conn.destroy(),
+        };
+
+        conn.on("data", (chunk: Buffer) => {
+          const combined = remainder.length > 0
+            ? Buffer.concat([remainder, chunk])
+            : chunk;
+          const result = parseFrames(combined);
+          remainder = result.remainder;
+          for (const json of result.messages) {
+            try {
+              this.handleResponse(JSON.parse(json) as DaemonResponse);
+            } catch {}
+          }
+        });
+
+        conn.on("close", () => {
+          this.transport = null;
+        });
+
         resolve();
       });
       conn.once("error", reject);
     });
   }
 
-  private startReading(): void {
-    if (!this.conn) return;
+  private async connectWs(url: string, token?: string): Promise<void> {
+    // Extract remote host for port forwarding fix-up
+    try {
+      const parsed = new URL(url);
+      this.remoteHost = parsed.hostname;
+    } catch {}
 
-    let remainder: Buffer = Buffer.alloc(0);
-
-    this.conn.on("data", (chunk: Buffer) => {
-      const combined: Buffer = remainder.length > 0
-        ? Buffer.concat([remainder, chunk])
-        : chunk;
-
-      const result = parseFrames(combined);
-      remainder = result.remainder;
-
-      for (const json of result.messages) {
-        try {
-          this.handleResponse(JSON.parse(json) as DaemonResponse);
-        } catch {}
+    return new Promise((resolve, reject) => {
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
       }
+
+      const ws = new WebSocket(url, { headers, perMessageDeflate: false });
+
+      ws.once("open", () => {
+        // Disable Nagle on the underlying TCP socket
+        const rawSocket = (ws as unknown as { _socket?: { setNoDelay?: (v: boolean) => void } })._socket;
+        rawSocket?.setNoDelay?.(true);
+
+        this.transport = {
+          send: (msg: object) => ws.send(JSON.stringify(msg)),
+          onMessage: null,
+          onClose: null,
+          close: () => ws.close(),
+        };
+
+        ws.on("message", (data: Buffer | string) => {
+          try {
+            const str = typeof data === "string" ? data : data.toString("utf-8");
+            this.handleResponse(JSON.parse(str) as DaemonResponse);
+          } catch {}
+        });
+
+        ws.on("close", () => {
+          this.transport = null;
+        });
+
+        resolve();
+      });
+
+      ws.once("error", reject);
     });
   }
 
@@ -131,23 +194,23 @@ export class DaemonClient {
 
   private request(msg: object): Promise<DaemonResponse> {
     return new Promise((resolve, reject) => {
-      if (!this.conn) {
+      if (!this.transport) {
         reject(new Error("Not connected to daemon"));
         return;
       }
       const reqId = this.nextReqId++;
       this.pending.set(reqId, { resolve, reject });
-      this.conn.write(encodeMessage({ ...msg, reqId }));
+      this.transport.send({ ...msg, reqId });
     });
   }
 
   /** Send a message without waiting for a response (fire-and-forget). */
   private sendNoReply(msg: object): void {
-    if (!this.conn) return;
+    if (!this.transport) return;
     const reqId = this.nextReqId++;
     const cleanup = () => { this.pending.delete(reqId); };
     this.pending.set(reqId, { resolve: cleanup as (v: DaemonResponse) => void, reject: cleanup as (e: Error) => void });
-    this.conn.write(encodeMessage({ ...msg, reqId }));
+    this.transport.send({ ...msg, reqId });
   }
 
   async create(): Promise<RemoteSandbox> {
@@ -258,7 +321,7 @@ export class DaemonClient {
   /** @internal */
   _forwardPort(sandboxId: string, guestPort: number): Promise<{ host: string; port: number }> {
     return this.request({ method: "forwardPort", sandboxId, guestPort }).then((r) => ({
-      host: r.host ?? "127.0.0.1",
+      host: this.remoteHost ?? r.host ?? "127.0.0.1",
       port: r.port ?? 0,
     }));
   }
@@ -279,9 +342,9 @@ export class DaemonClient {
   }
 
   close(): void {
-    if (this.conn) {
-      this.conn.destroy();
-      this.conn = null;
+    if (this.transport) {
+      this.transport.close();
+      this.transport = null;
     }
   }
 }

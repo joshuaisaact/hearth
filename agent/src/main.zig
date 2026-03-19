@@ -362,20 +362,27 @@ fn handleInteractiveSpawn(sock: posix.fd_t, cmd_str: []const u8, cols: u16, rows
 /// Bidirectional poll loop: PTY master output → host, host stdin/resize → PTY master.
 /// Returns true if the child exited during the loop.
 fn interactivePollLoop(sock: posix.fd_t, master_fd: posix.fd_t, child_pid: posix.pid_t) bool {
-    var pfds = [2]posix.pollfd{
+    // Set vsock to non-blocking — Firecracker's virtio-vsock doesn't reliably
+    // trigger POLLIN in the guest, so we must try reading on every iteration.
+    const O_NONBLOCK: u32 = 0x800;
+    const orig_flags = linux.fcntl(sock, linux.F.GETFL, @as(u32, 0));
+    _ = linux.fcntl(sock, linux.F.SETFL, orig_flags | O_NONBLOCK);
+
+    // Only poll on PTY master — vsock is read via non-blocking read below
+    var pfds = [1]posix.pollfd{
         .{ .fd = master_fd, .events = posix.POLL.IN | posix.POLL.HUP, .revents = 0 },
-        .{ .fd = sock, .events = posix.POLL.IN | posix.POLL.HUP, .revents = 0 },
     };
     var recv_carry: usize = 0;
 
     while (true) {
-        _ = posix.poll(&pfds, 300) catch break; // 300ms — child exit checked each iteration
+        _ = posix.poll(&pfds, 50) catch break; // 50ms — responsive to both PTY and vsock
 
         // Check child exit on every iteration
         const wresult = posix.waitpid(child_pid, posix.W.NOHANG);
         if (wresult.pid != 0) {
             drainPty(sock, master_fd);
             sendExitMessage(sock, wresult.status);
+            _ = linux.fcntl(sock, linux.F.SETFL, orig_flags);
             return true;
         }
 
@@ -389,12 +396,11 @@ fn interactivePollLoop(sock: posix.fd_t, master_fd: posix.fd_t, child_pid: posix
             }
         }
 
-        // Host → PTY (stdin/resize)
-        if (pfds[1].revents & (posix.POLL.IN | posix.POLL.HUP) != 0) {
-            if (pfds[1].revents & posix.POLL.HUP != 0) break;
-            recv_carry = processVsockInput(sock, master_fd, recv_carry) orelse break;
-        }
+        // Host → PTY (stdin/resize) — non-blocking read every iteration
+        recv_carry = processVsockInputNonblock(sock, master_fd, recv_carry) orelse break;
     }
+
+    _ = linux.fcntl(sock, linux.F.SETFL, orig_flags);
     return false;
 }
 
@@ -438,6 +444,58 @@ fn processVsockInput(sock: posix.fd_t, master_fd: posix.fd_t, recv_carry: usize)
     }
 
     // Carry over partial frame
+    if (offset < recv_len) {
+        const remaining = recv_len - offset;
+        std.mem.copyForwards(u8, interactive_recv_buf[0..remaining], interactive_recv_buf[offset..recv_len]);
+        return remaining;
+    }
+    return 0;
+}
+
+/// Non-blocking variant of processVsockInput for the interactive poll loop.
+/// Returns updated recv_carry, or null if the connection closed (n == 0 on a read).
+fn processVsockInputNonblock(sock: posix.fd_t, master_fd: posix.fd_t, recv_carry: usize) ?usize {
+    const space = interactive_recv_buf.len - recv_carry;
+    if (space == 0) return 0;
+    const n = posix.read(sock, interactive_recv_buf[recv_carry..][0..space]) catch |err| {
+        return switch (err) {
+            error.WouldBlock => recv_carry, // no data available — not an error
+            else => null,
+        };
+    };
+    if (n == 0) return null; // connection closed
+
+    const recv_len: usize = recv_carry + n;
+    var offset: usize = 0;
+    while (offset + 4 <= recv_len) {
+        const msg_len = std.mem.readInt(u32, interactive_recv_buf[offset..][0..4], .little);
+        if (offset + 4 + msg_len > recv_len) break;
+        const msg_data = interactive_recv_buf[offset + 4 .. offset + 4 + msg_len];
+        offset += 4 + msg_len;
+
+        const msg_type = jsonStr(msg_data, "type") orelse continue;
+
+        if (std.mem.eql(u8, msg_type, "stdin")) {
+            const b64_data = jsonStr(msg_data, "data") orelse continue;
+            const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(b64_data) catch continue;
+            if (decoded_len > stdin_buf.len) continue;
+            std.base64.standard.Decoder.decode(stdin_buf[0..decoded_len], b64_data) catch continue;
+            writeAll(master_fd, stdin_buf[0..decoded_len]) catch return null;
+        } else if (std.mem.eql(u8, msg_type, "resize")) {
+            const new_cols = jsonU32(msg_data, "cols");
+            const new_rows = jsonU32(msg_data, "rows");
+            if (new_cols > 0 and new_cols <= 65535 and new_rows > 0 and new_rows <= 65535) {
+                var new_ws = c.winsize{
+                    .ws_row = @intCast(new_rows),
+                    .ws_col = @intCast(new_cols),
+                    .ws_xpixel = 0,
+                    .ws_ypixel = 0,
+                };
+                _ = c.ioctl(master_fd, c.TIOCSWINSZ, &new_ws);
+            }
+        }
+    }
+
     if (offset < recv_len) {
         const remaining = recv_len - offset;
         std.mem.copyForwards(u8, interactive_recv_buf[0..remaining], interactive_recv_buf[offset..recv_len]);
