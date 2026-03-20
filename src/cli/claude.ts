@@ -70,33 +70,38 @@ export async function claudeCommand(args: string[]): Promise<void> {
     ? await (async () => { const c = new DaemonClient(); await c.connect(); return c; })()
     : await ensureDaemon();
 
-  // Determine snapshot: first non-flag arg could be an environment name
-  let envName: string | undefined;
+  // Determine snapshot: first non-flag arg could be an environment or checkpoint name
+  let snapshotArg: string | undefined;
+  let isEnv = false;
   let claudeArgs: string[] = [];
 
   // Split args at "--" if present, otherwise check first arg
   const dashDash = args.indexOf("--");
   if (dashDash !== -1) {
-    envName = args.slice(0, dashDash)[0];
+    snapshotArg = args.slice(0, dashDash)[0];
     claudeArgs = args.slice(dashDash + 1);
   } else if (args.length > 0 && !args[0].startsWith("-")) {
-    // Check if first arg is an environment name
     const snapDir = join(homedir(), ".hearth", "snapshots", args[0]);
-    if (existsSync(snapDir) && isEnvironment(snapDir)) {
-      envName = args[0];
+    if (existsSync(snapDir)) {
+      snapshotArg = args[0];
       claudeArgs = args.slice(1);
     } else {
-      // Not an environment — treat all args as claude args
+      // Not a known snapshot — treat all args as claude args
       claudeArgs = args;
     }
   } else {
     claudeArgs = args;
   }
 
-  const snapshotName = envName ?? CLAUDE_SNAPSHOT_NAME;
+  if (snapshotArg) {
+    const snapDir = join(homedir(), ".hearth", "snapshots", snapshotArg);
+    isEnv = existsSync(snapDir) && isEnvironment(snapDir);
+  }
 
-  console.log(envName
-    ? `Restoring Claude Code in environment "${envName}"...`
+  const snapshotName = snapshotArg ?? CLAUDE_SNAPSHOT_NAME;
+
+  console.log(snapshotArg
+    ? `Restoring Claude Code from "${snapshotArg}"...`
     : "Restoring Claude Code sandbox...");
 
   let sandbox: SandboxLike;
@@ -108,7 +113,7 @@ export async function claudeCommand(args: string[]): Promise<void> {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("not found") || msg.includes("does not exist")) {
       console.error(`Snapshot "${snapshotName}" not found.`);
-      if (!envName) {
+      if (!snapshotArg) {
         console.error("Create it first: npx hearth snapshot-claude");
       }
     } else {
@@ -121,9 +126,9 @@ export async function claudeCommand(args: string[]): Promise<void> {
 
   // Run environment start phase if this is an environment
   let workdir = "/home/agent";
-  if (envName) {
+  if (isEnv && snapshotArg) {
     try {
-      const result = await startEnvironment({ name: envName, sandbox });
+      const result = await startEnvironment({ name: snapshotArg, sandbox });
       workdir = result.workdir;
     } catch (err) {
       console.error(`Warning: start phase failed: ${err instanceof Error ? err.message : err}`);
@@ -162,7 +167,7 @@ export async function claudeCommand(args: string[]): Promise<void> {
   await sandbox.exec(
     "touch /home/agent/.bashrc && " +
     "grep -qxF 'source /home/agent/.hearth-claude.env' /home/agent/.bashrc || " +
-    "printf '\\nsource /home/agent/.hearth-claude.env\\n' >> /home/agent/.bashrc",
+    "{ echo >> /home/agent/.bashrc; echo 'source /home/agent/.hearth-claude.env' >> /home/agent/.bashrc; }",
   );
 
   // Inject host credentials into the VM

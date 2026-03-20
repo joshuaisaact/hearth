@@ -161,20 +161,17 @@ The daemon is auto-started if not already running. On macOS with `~/.hearthrc` c
 
 ## Checkpoint and Rollback
 
-Save a running sandbox's state without stopping it. Rollback by starting a new session from the checkpoint.
+Save a running sandbox's state as a named snapshot. The active session is terminated (vsock device reset), but you can immediately restore from the checkpoint.
 
 ```bash
 # Terminal 1: working in a sandbox
-hearth shell my-api
+hearth claude my-api
 
-# Terminal 2: save state
-hearth checkpoint before-refactor        # ~400ms
+# Terminal 2: save state (terminates the active session)
+hearth checkpoint before-refactor
 
-# Terminal 2: save again later
-hearth checkpoint after-tests-pass
-
-# If things go wrong, rollback by starting from the checkpoint
-hearth shell before-refactor
+# Restore from the checkpoint
+hearth claude before-refactor
 ```
 
 Checkpoints are full VM snapshots (memory + disk). Restoring one gives you the exact state at checkpoint time — files, processes, everything.

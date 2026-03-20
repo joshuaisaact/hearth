@@ -56,6 +56,9 @@ interface ActiveSandbox {
 const globalSandboxes = new Map<string, ActiveSandbox>();
 let globalNextId = 1;
 
+// Sandboxes currently being checkpointed — skip cleanup on disconnect.
+const checkpointLocks = new Set<string>();
+
 export function startDaemon(opts?: { wsPort?: number; wsToken?: string }): net.Server {
   try { unlinkSync(DAEMON_SOCK); } catch {}
 
@@ -103,6 +106,7 @@ function handleConnection(transport: Transport, isRemote: boolean): void {
   transport.onClose = () => {
     // Clean up sandboxes owned by this connection
     for (const id of ownedSandboxIds) {
+      if (checkpointLocks.has(id)) continue; // checkpoint in progress — don't destroy
       const active = globalSandboxes.get(id);
       if (active) {
         try { active.sandbox.destroySync(); } catch {}
@@ -157,6 +161,7 @@ async function handleMessage(
       handle.stderr.on("data", (data: string) => {
         send({ event: "stderr", spawnId, data });
       });
+
       handle.wait().then(({ exitCode }) => {
         send({ event: "exit", spawnId, exitCode });
         active.spawns.delete(spawnId);
@@ -228,8 +233,22 @@ async function handleMessage(
     case "checkpoint": {
       const sid = requireStr(msg.sandboxId, "sandboxId");
       const active = getSandbox(sandboxes, sid);
-      const name = await active.sandbox.checkpoint(requireStr(msg.name, "name"));
-      return { ok: true, name };
+      const cpName = requireStr(msg.name, "name");
+
+      // Pause → save → destroy. The guest agent has a heartbeat that detects
+      // broken vsock connections, so on restore it will exit any active spawn
+      // poll loop and reconnect within ~1s.
+      checkpointLocks.add(sid);
+      try {
+        await active.sandbox.pause();
+        await active.sandbox.saveSnapshotArtifacts(cpName, false);
+      } finally {
+        active.sandbox.destroySync();
+        sandboxes.delete(sid);
+        ownedIds.delete(sid);
+        checkpointLocks.delete(sid);
+      }
+      return { ok: true, name: cpName };
     }
 
     case "snapshot": {

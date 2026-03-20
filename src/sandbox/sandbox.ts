@@ -141,7 +141,10 @@ export class Sandbox {
 
     const vsockPath = join(runDir, VSOCK_NAME);
     const agent = new AgentClient(vsockPath);
-    const agentConnected = agent.waitForConnection(10000);
+    // 15s timeout: checkpoint snapshots may have the agent in a spawn poll loop.
+    // The agent's idle timeout (~3s without host keepalives) will cause it to
+    // disconnect and reconnect, so 15s gives plenty of headroom.
+    const agentConnected = agent.waitForConnection(15000);
 
     const proc = spawn(
       getFirecrackerPath(),
@@ -202,7 +205,7 @@ export class Sandbox {
    * @param keepRunning - If true, copies rootfs (VM keeps using it).
    *                      If false, moves rootfs (faster, VM being destroyed).
    */
-  private async saveSnapshotArtifacts(name: string, keepRunning: boolean): Promise<string> {
+  async saveSnapshotArtifacts(name: string, keepRunning: boolean): Promise<string> {
     const snapDir = userSnapshotDir(name);
     if (existsSync(snapDir)) {
       throw new Error(`Snapshot "${name}" already exists`);
@@ -247,6 +250,24 @@ export class Sandbox {
     return name;
   }
 
+  /** Pause the VM. */
+  async pause(): Promise<void> {
+    this.ensureAlive();
+    await this.api.pause();
+  }
+
+  /**
+   * Close the current agent connection and wait for the guest agent to reconnect.
+   * This forces the agent out of any active spawn poll loop back into commandLoop.
+   */
+  async reconnectAgent(timeoutMs: number = 10000): Promise<void> {
+    this.ensureAlive();
+    this.agent.close();
+    this.agent = new AgentClient(this.vsockPath);
+    await this.agent.waitForConnection(timeoutMs);
+    await this.agent.ping();
+  }
+
   /**
    * Checkpoint the current sandbox state as a named snapshot.
    * The sandbox remains running and usable after this call.
@@ -267,11 +288,7 @@ export class Sandbox {
     await this.api.resume();
 
     // createSnapshot resets the vsock device, so the old connection is dead.
-    // Close it and wait for the guest agent to reconnect.
-    this.agent.close();
-    this.agent = new AgentClient(this.vsockPath);
-    await this.agent.waitForConnection(10000);
-    await this.agent.ping();
+    await this.reconnectAgent(10000);
 
     return name;
   }

@@ -114,7 +114,7 @@ if (command === "setup") {
   console.log("  envs        List, inspect, or remove environments");
   console.log("  claude      Launch Claude Code in an isolated sandbox");
   console.log("  shell       Start an interactive shell in a sandbox");
-  console.log("  checkpoint  Save a running sandbox's state (rollback with 'hearth shell <name>')");
+  console.log("  checkpoint  Save a running sandbox's state (restore with 'hearth claude <name>')");
   console.log("  daemon      Start the Hearth daemon (for multi-process/remote access)");
   console.log("  connect     Configure remote daemon connection (hearth connect <host>)");
   console.log("  pool        Manage dm-thin snapshot pool (status, destroy)");

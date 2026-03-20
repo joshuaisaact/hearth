@@ -299,6 +299,7 @@ export class DaemonClient {
       },
       wait: () => exitPromise,
       kill: () => {},
+      keepalive: () => {},
     };
   }
 

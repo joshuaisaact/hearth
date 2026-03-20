@@ -104,6 +104,12 @@ fn connectWithRetry() !posix.fd_t {
     return error.ConnectFailed;
 }
 
+// Flag set by processVsockInput* when data arrives from the host.
+var vsock_data_received: bool = false;
+
+// Set when an idle timeout triggers — tells commandLoop to exit.
+var force_reconnect: bool = false;
+
 // Static buffers — avoids blowing the stack.
 var main_msg_buf: [64 * 1024]u8 = undefined;
 var main_resp_buf: [1024 * 1024]u8 = undefined;
@@ -347,8 +353,8 @@ fn handleInteractiveSpawn(sock: posix.fd_t, cmd_str: []const u8, cols: u16, rows
     const child_exited = interactivePollLoop(sock, master_fd, child_pid);
 
     if (!child_exited) {
-        drainPty(sock, master_fd);
-        posix.kill(child_pid, posix.SIG.HUP) catch {};
+        // Kill the child process. SIGKILL ensures it dies even if it traps signals.
+        posix.kill(child_pid, posix.SIG.KILL) catch {};
     }
 
     posix.close(master_fd);
@@ -356,6 +362,9 @@ fn handleInteractiveSpawn(sock: posix.fd_t, cmd_str: []const u8, cols: u16, rows
     if (!child_exited) {
         const wresult = posix.waitpid(child_pid, 0);
         sendExitMessage(sock, wresult.status);
+        // Signal commandLoop to exit. The idle timeout triggered (e.g. snapshot
+        // restore into a new host) — the connection is stale.
+        force_reconnect = true;
     }
 }
 
@@ -368,14 +377,21 @@ fn interactivePollLoop(sock: posix.fd_t, master_fd: posix.fd_t, child_pid: posix
     const orig_flags = linux.fcntl(sock, linux.F.GETFL, @as(u32, 0));
     _ = linux.fcntl(sock, linux.F.SETFL, orig_flags | O_NONBLOCK);
 
-    // Only poll on PTY master — vsock is read via non-blocking read below
+    // Poll on PTY master. Vsock is read via non-blocking reads below.
     var pfds = [1]posix.pollfd{
         .{ .fd = master_fd, .events = posix.POLL.IN | posix.POLL.HUP, .revents = 0 },
     };
     var recv_carry: usize = 0;
+    var idle_counter: u32 = 0;
 
     while (true) {
-        _ = posix.poll(&pfds, 50) catch break; // 50ms — responsive to both PTY and vsock
+        _ = posix.poll(&pfds, 50) catch break; // 50ms
+
+        // If no data from host for ~5s, assume connection is stale (e.g. after
+        // snapshot restore into a new Firecracker instance). The host sends
+        // keepalives every ~1s to prevent false disconnects during normal use.
+        idle_counter += 1;
+        if (idle_counter >= 100) break; // 100 * 50ms = 5s
 
         // Check child exit on every iteration
         const wresult = posix.waitpid(child_pid, posix.W.NOHANG);
@@ -396,8 +412,10 @@ fn interactivePollLoop(sock: posix.fd_t, master_fd: posix.fd_t, child_pid: posix
             }
         }
 
-        // Host → PTY (stdin/resize) — non-blocking read every iteration
+        // Host → PTY (stdin/resize/keepalive) — non-blocking read every iteration
+        vsock_data_received = false;
         recv_carry = processVsockInputNonblock(sock, master_fd, recv_carry) orelse break;
+        if (vsock_data_received) idle_counter = 0;
     }
 
     _ = linux.fcntl(sock, linux.F.SETFL, orig_flags);
@@ -422,7 +440,9 @@ fn processVsockInput(sock: posix.fd_t, master_fd: posix.fd_t, recv_carry: usize)
 
         const msg_type = jsonStr(msg_data, "type") orelse continue;
 
-        if (std.mem.eql(u8, msg_type, "stdin")) {
+        if (std.mem.eql(u8, msg_type, "kill")) {
+            return null;
+        } else if (std.mem.eql(u8, msg_type, "stdin")) {
             const b64_data = jsonStr(msg_data, "data") orelse continue;
             const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(b64_data) catch continue;
             if (decoded_len > stdin_buf.len) continue;
@@ -464,6 +484,7 @@ fn processVsockInputNonblock(sock: posix.fd_t, master_fd: posix.fd_t, recv_carry
         };
     };
     if (n == 0) return null; // connection closed
+    vsock_data_received = true;
 
     const recv_len: usize = recv_carry + n;
     var offset: usize = 0;
@@ -475,7 +496,9 @@ fn processVsockInputNonblock(sock: posix.fd_t, master_fd: posix.fd_t, recv_carry
 
         const msg_type = jsonStr(msg_data, "type") orelse continue;
 
-        if (std.mem.eql(u8, msg_type, "stdin")) {
+        if (std.mem.eql(u8, msg_type, "kill")) {
+            return null; // host requested spawn termination (e.g. before checkpoint)
+        } else if (std.mem.eql(u8, msg_type, "stdin")) {
             const b64_data = jsonStr(msg_data, "data") orelse continue;
             const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(b64_data) catch continue;
             if (decoded_len > stdin_buf.len) continue;
@@ -961,6 +984,8 @@ fn jsonU32(json: []const u8, key: []const u8) u32 {
 /// Process commands from the host until the connection drops.
 fn commandLoop(sock: posix.fd_t) void {
     while (true) {
+        if (force_reconnect) break;
+
         const payload = recvMsg(sock, &main_msg_buf) catch break;
 
         const method = jsonStr(payload, "method") orelse {
@@ -971,6 +996,7 @@ fn commandLoop(sock: posix.fd_t) void {
         // Spawn methods send multiple messages directly — no single response.
         if (std.mem.eql(u8, method, "spawn")) {
             dispatchSpawn(sock, payload);
+            if (force_reconnect) break;
             continue;
         }
 
@@ -1027,6 +1053,7 @@ pub fn main() !void {
         };
 
         _ = posix.write(1, "hearth-agent: connected to host\n") catch {};
+        force_reconnect = false;
 
         // (Re)start background listeners after each reconnect.
         // Forked children don't survive snapshot restore, so we

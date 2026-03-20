@@ -1,8 +1,5 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import { dirname } from "node:path";
 import { DaemonClient } from "../daemon/client.js";
 import { resolveConnection } from "../daemon/config.js";
 
@@ -84,6 +81,7 @@ export async function checkpointCommand(args: string[]): Promise<void> {
     const t0 = Date.now();
     await client._checkpoint(sandboxId, name);
     console.log(`Checkpoint "${name}" created (${Date.now() - t0}ms)`);
+    console.log(`Note: the active session was terminated. Restore with: hearth claude ${name}`);
   } finally {
     client.close();
   }

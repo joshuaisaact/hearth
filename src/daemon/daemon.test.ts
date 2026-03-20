@@ -67,4 +67,45 @@ describe.skipIf(!hasKvm)("Daemon", () => {
     const snapshots = await client.listSnapshots();
     expect(Array.isArray(snapshots)).toBe(true);
   }, 5000);
+
+  it("should list active sessions", async () => {
+    const sandbox = await client.create();
+    const sessions = await client.listSessions();
+    expect(sessions.length).toBeGreaterThan(0);
+    await sandbox.destroy();
+  }, 30000);
+
+  it("should checkpoint and restore via daemon", async () => {
+    const sandbox = await client.create();
+    await sandbox.writeFile("/tmp/cp-test.txt", "before-checkpoint");
+
+    // Spawn an interactive process (simulates hearth claude)
+    const handle = sandbox.spawn("cat", { interactive: true, cols: 80, rows: 24 });
+
+    // Checkpoint via a second client (simulates hearth checkpoint from another terminal)
+    const client2 = new DaemonClient();
+    await client2.connect(DAEMON_SOCK);
+
+    const sessions = await client2.listSessions();
+    expect(sessions.length).toBeGreaterThan(0);
+
+    const snapName = `test-daemon-cp-${Date.now()}`;
+    await client2._checkpoint(sessions[0], snapName);
+    client2.close();
+
+    // The spawn should have been terminated
+    const { exitCode } = await handle.wait();
+    expect(exitCode).not.toBe(0);
+
+    // Restore from checkpoint — file should have pre-checkpoint content
+    try {
+      const restored = await client.fromSnapshot(snapName);
+      const result = await restored.exec("cat /tmp/cp-test.txt");
+      expect(result.stdout).toBe("before-checkpoint");
+      await restored.destroy();
+    } finally {
+      const { Sandbox } = await import("../sandbox/sandbox.js");
+      Sandbox.deleteSnapshot(snapName);
+    }
+  }, 60000);
 });
