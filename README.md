@@ -84,6 +84,69 @@ npx hearth setup
 
 Downloads Firecracker v1.15.0, guest kernel, prebuilt agent binary, builds an Ubuntu rootfs via Docker, and captures a base snapshot. Takes ~1-2 minutes on first run, idempotent after that.
 
+## Environments
+
+Environments are pre-built, snapshotted sandbox configurations. Go from "I have a repo" to "isolated VM with code cloned, deps installed, and Claude Code ready" in one command.
+
+### Hearthfile
+
+Define your environment in a `Hearthfile.toml`:
+
+```toml
+name = "my-api"
+repo = "github.com/user/my-api"
+branch = "main"
+
+# Run once during build, baked into snapshot
+setup = [
+  "npm install",
+  "npm install -g @anthropic-ai/claude-code",
+]
+
+# Run on every start (after snapshot restore)
+start = ["redis-server --daemonize yes"]
+
+# Ports to auto-forward to host
+ports = [8000, 6379]
+
+# Optional: poll before handing control to user
+ready = "http://localhost:8000/health"
+
+# Optional: inject files from host
+[[files]]
+from = "~/.ssh/id_ed25519"
+to = "/home/agent/.ssh/id_ed25519"
+mode = "0600"
+```
+
+### Build and use
+
+```bash
+hearth build                    # build from Hearthfile.toml in current dir
+hearth claude my-api            # Claude Code inside the environment
+hearth shell my-api             # plain shell inside the environment
+```
+
+The first build takes seconds to minutes (clone + install). After that, every restore is from snapshot (~200ms). Rebuild when deps change:
+
+```bash
+hearth rebuild my-api
+```
+
+### Quick build (no Hearthfile)
+
+```bash
+hearth build my-api --repo github.com/user/my-api
+```
+
+### Managing environments
+
+```bash
+hearth envs                     # list all environments
+hearth envs inspect my-api      # show Hearthfile + metadata
+hearth envs rm my-api           # delete environment and snapshot
+```
+
 ## Interactive Shell
 
 `hearth shell` drops you into a live bash session inside a sandbox:
@@ -91,6 +154,7 @@ Downloads Firecracker v1.15.0, guest kernel, prebuilt agent binary, builds an Ub
 ```bash
 hearth shell                    # boot from base snapshot
 hearth shell my-project-ready   # boot from a named snapshot
+hearth shell my-api             # boot an environment (runs start commands)
 ```
 
 The daemon is auto-started if not already running. On macOS with `~/.hearthrc` configured, it connects to the remote daemon over WebSocket. The host terminal is set to raw mode — keystrokes are forwarded directly, Ctrl-C/Ctrl-D work as expected, and window resizes propagate via SIGWINCH.
@@ -212,6 +276,70 @@ await using sandbox = await Sandbox.create();
 // sandbox.destroy() called automatically at end of scope
 ```
 
+### `Environment.build(config)`
+
+Build an environment from a `Hearthfile` config object. Boots a sandbox, clones the repo, runs setup commands, and captures a snapshot.
+
+```typescript
+import { Environment } from "hearth";
+import type { Hearthfile } from "hearth";
+
+const config: Hearthfile = {
+  name: "my-api",
+  repo: "github.com/user/my-api",
+  setup: ["npm install"],
+  start: ["npm run dev"],
+  ports: [3000],
+};
+
+await Environment.build(config);
+```
+
+### `Environment.start(name)`
+
+Restore a previously built environment from snapshot. Re-injects credentials, runs start commands, forwards ports. Returns the sandbox and start metadata.
+
+```typescript
+const { sandbox, meta, workdir, ports } = await Environment.start("my-api");
+await sandbox.exec("npm test", { cwd: workdir });
+await sandbox.destroy();
+```
+
+### `Environment.get(config)`
+
+Build-if-needed, then start. Idempotent — if the snapshot already exists, skips the build.
+
+```typescript
+const { sandbox, workdir } = await Environment.get(config);
+```
+
+### `Environment.rebuild(name)`
+
+Delete the existing snapshot and rebuild from the stored Hearthfile. The previous snapshot is backed up and restored if the rebuild fails.
+
+```typescript
+await Environment.rebuild("my-api");
+```
+
+### `Environment.list()`
+
+List all built environments with their metadata.
+
+```typescript
+const envs = Environment.list();
+for (const env of envs) {
+  console.log(`${env.name} — built ${env.builtAt}`);
+}
+```
+
+### `Environment.remove(name)`
+
+Delete an environment and its snapshot.
+
+```typescript
+Environment.remove("my-api");
+```
+
 ## Architecture
 
 ```
@@ -243,8 +371,11 @@ src/                    TypeScript SDK
   daemon/transport.ts   Transport interface (UDS length-prefixed, WS text frames)
   daemon/ws-server.ts   WebSocket listener with Bearer token auth
   daemon/config.ts      ~/.hearthrc config resolution + env var overrides
+  environment/          Environments — Hearthfile parsing, build, start, metadata
   claude.ts             ClaudeSandbox helper (pre-installed Claude Code + runtime auth)
-  cli/claude.ts         `hearth claude` — interactive Claude Code in a sandbox
+  cli/claude.ts         `hearth claude` — interactive Claude Code in a sandbox or environment
+  cli/build.ts          `hearth build` — build environment from Hearthfile
+  cli/envs.ts           `hearth envs` — list, inspect, remove environments
   network/proxy.ts      HTTP CONNECT proxy for internet access over vsock
   vm/api.ts             Firecracker REST API client
   vm/snapshot.ts        Base snapshot creation and management
@@ -269,7 +400,31 @@ docs/                   Specs, design docs, references
 
 The primary use case — run an AI agent with full autonomy in a safe, isolated environment. `--dangerously-skip-permissions` is actually safe because the sandbox *is* the permission boundary.
 
-### Quick start (CLI)
+### Quick start: environment (recommended)
+
+1. Create a `Hearthfile.toml` for your project:
+
+```toml
+name = "my-api"
+repo = "github.com/user/my-api"
+setup = [
+  "npm install",
+  "npm install -g @anthropic-ai/claude-code",
+]
+```
+
+2. Build and launch:
+
+```bash
+hearth build
+hearth claude my-api
+```
+
+Restores the snapshot in ~200ms, injects your host's Claude Code credentials, enables internet, and drops you into an interactive Claude Code session inside an isolated VM. Your host credentials are read from `~/.claude/.credentials.json` — no manual token setup required.
+
+### Quick start: bare sandbox
+
+If you don't need a project environment, use the `claude-base` snapshot:
 
 1. Create the `claude-base` snapshot (one-time, ~2 minutes):
 
@@ -278,18 +433,19 @@ node --experimental-strip-types examples/create-claude-snapshot.ts           # L
 node --experimental-strip-types examples/create-claude-snapshot.ts --daemon  # macOS
 ```
 
-2. Launch Claude Code in a sandbox:
+2. Launch Claude Code:
 
 ```bash
 hearth claude
 ```
 
-That's it. Restores the snapshot in ~200ms, injects your host's Claude Code credentials, enables internet, and drops you into an interactive Claude Code session inside an isolated VM. Your host credentials are read from `~/.claude/.credentials.json` — no manual token setup required.
+### CLI args
 
-You can also pass CLI args through:
+Pass args through to Claude Code:
 
 ```bash
-hearth claude -p "Build a REST API with Express"   # non-interactive
+hearth claude my-api -- -p "Build a REST API with Express"   # non-interactive, in environment
+hearth claude -p "Build a REST API with Express"             # non-interactive, bare sandbox
 ```
 
 ### Programmatic API
@@ -329,7 +485,9 @@ See [examples/claude-in-sandbox.ts](examples/claude-in-sandbox.ts) for a complet
 
 **v0.2**: `npx hearth setup` CLI, vsock port forwarding, tar-based upload/download, user-facing snapshots, streaming exec, internet access via HTTPS proxy, daemon server/client.
 
-**v0.3 (current)**: Prebuilt agent binaries (done), dm-thin instant snapshots, observability, npm publish.
+**v0.3**: Prebuilt agent binaries, dm-thin instant snapshots.
+
+**v0.5 (current)**: Environments — declarative `Hearthfile.toml`, `hearth build`/`rebuild`/`envs`, environment-aware `hearth claude` and `hearth shell`.
 
 See [docs/exec-plans/](docs/exec-plans/) for detailed execution plans.
 

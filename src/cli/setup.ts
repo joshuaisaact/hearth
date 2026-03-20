@@ -232,6 +232,7 @@ async function setupRootfs() {
         "    && npm install -g node-gyp \\",
         "    && node-gyp install",
         "RUN echo 'root:root' | chpasswd",
+        "RUN useradd -m -s /bin/bash agent",
         "COPY hearth-agent /usr/local/bin/hearth-agent",
         "RUN chmod +x /usr/local/bin/hearth-agent",
         "",

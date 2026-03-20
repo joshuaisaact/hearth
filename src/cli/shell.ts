@@ -2,14 +2,22 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+import { existsSync } from "node:fs";
 import { DaemonClient } from "../daemon/client.js";
 import { resolveConnection } from "../daemon/config.js";
+import { isEnvironment } from "../environment/metadata.js";
+import { startEnvironment } from "../environment/start.js";
 import type { SpawnHandle } from "../agent/client.js";
+import type { ExecResult } from "../sandbox/types.js";
 
 const DAEMON_SOCK = join(homedir(), ".hearth", "daemon.sock");
 
 interface SandboxLike {
+  exec(command: string, opts?: { cwd?: string; timeout?: number }): Promise<ExecResult>;
+  writeFile(path: string, content: string | Buffer): Promise<void>;
   spawn(command: string, opts: { interactive: boolean; cols: number; rows: number }): SpawnHandle;
+  enableInternet(): Promise<void>;
+  forwardPort(guestPort: number): Promise<{ host: string; port: number }>;
   destroy(): Promise<void>;
 }
 
@@ -92,10 +100,26 @@ export async function shellCommand(args: string[]): Promise<void> {
 
   const { sandbox, cleanup } = await createSandbox(snapshotName);
 
+  // If this is an environment, run start phase
+  let shellCwd: string | undefined;
+  if (snapshotName) {
+    const snapDir = join(homedir(), ".hearth", "snapshots", snapshotName);
+    if (existsSync(snapDir) && isEnvironment(snapDir)) {
+      try {
+        const result = await startEnvironment({ name: snapshotName, sandbox });
+        shellCwd = result.workdir;
+      } catch (err) {
+        console.error(`Warning: start phase failed: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+  }
+
   const cols = process.stdout.columns || 80;
   const rows = process.stdout.rows || 24;
 
-  const handle: SpawnHandle = sandbox.spawn("/bin/bash -l", {
+  const shellEscape = (v: string) => "'" + v.replace(/'/g, "'\\''") + "'";
+  const shellCmd = shellCwd ? `cd -- ${shellEscape(shellCwd)} && /bin/bash -l` : "/bin/bash -l";
+  const handle: SpawnHandle = sandbox.spawn(shellCmd, {
     interactive: true,
     cols,
     rows,
