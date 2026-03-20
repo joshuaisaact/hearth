@@ -24,6 +24,7 @@ interface DaemonResponse {
   port?: number;
   name?: string;
   snapshots?: unknown;
+  sessions?: string[];
 }
 
 /** Incoming daemon request — discriminated by method. */
@@ -50,6 +51,11 @@ interface ActiveSandbox {
   spawns: Map<number, SpawnHandle>;
 }
 
+// Global sandbox registry — shared across connections so
+// `hearth checkpoint` from one terminal can target another's sandbox.
+const globalSandboxes = new Map<string, ActiveSandbox>();
+let globalNextId = 1;
+
 export function startDaemon(opts?: { wsPort?: number; wsToken?: string }): net.Server {
   try { unlinkSync(DAEMON_SOCK); } catch {}
 
@@ -70,8 +76,7 @@ export function startDaemon(opts?: { wsPort?: number; wsToken?: string }): net.S
 }
 
 function handleConnection(transport: Transport, isRemote: boolean): void {
-  const sandboxes = new Map<string, ActiveSandbox>();
-  let nextId = 1;
+  const ownedSandboxIds = new Set<string>();
   let nextSpawnId = 1;
 
   // Serial message queue — process one at a time to prevent races
@@ -84,7 +89,8 @@ function handleConnection(transport: Transport, isRemote: boolean): void {
         const msg = raw as DaemonRequest;
         reqId = typeof msg.reqId === "number" ? msg.reqId : undefined;
         const response = await handleMessage(
-          msg, sandboxes, () => nextId++, () => nextSpawnId++,
+          msg, globalSandboxes, ownedSandboxIds,
+          () => `sb_${globalNextId++}`, () => nextSpawnId++,
           (m) => transport.send(m), isRemote,
         );
         transport.send({ ...response, reqId });
@@ -95,18 +101,23 @@ function handleConnection(transport: Transport, isRemote: boolean): void {
   };
 
   transport.onClose = () => {
-    // Clean up all sandboxes owned by this connection
-    for (const [_id, active] of sandboxes) {
-      try { active.sandbox.destroySync(); } catch {}
+    // Clean up sandboxes owned by this connection
+    for (const id of ownedSandboxIds) {
+      const active = globalSandboxes.get(id);
+      if (active) {
+        try { active.sandbox.destroySync(); } catch {}
+        globalSandboxes.delete(id);
+      }
     }
-    sandboxes.clear();
+    ownedSandboxIds.clear();
   };
 }
 
 async function handleMessage(
   msg: DaemonRequest,
   sandboxes: Map<string, ActiveSandbox>,
-  allocId: () => number,
+  ownedIds: Set<string>,
+  allocId: () => string,
   allocSpawnId: () => number,
   send: (msg: object) => void,
   isRemote: boolean,
@@ -114,15 +125,17 @@ async function handleMessage(
   switch (msg.method) {
     case "create": {
       const sandbox = await Sandbox.create();
-      const sandboxId = `sb_${allocId()}`;
+      const sandboxId = allocId();
       sandboxes.set(sandboxId, { sandbox, spawns: new Map() });
+      ownedIds.add(sandboxId);
       return { ok: true, sandboxId };
     }
 
     case "fromSnapshot": {
       const sandbox = await Sandbox.fromSnapshot(requireStr(msg.name, "name"));
-      const sandboxId = `sb_${allocId()}`;
+      const sandboxId = allocId();
       sandboxes.set(sandboxId, { sandbox, spawns: new Map() });
+      ownedIds.add(sandboxId);
       return { ok: true, sandboxId };
     }
 
@@ -224,6 +237,7 @@ async function handleMessage(
       const active = getSandbox(sandboxes, sid);
       const name = await active.sandbox.snapshot(requireStr(msg.name, "name"));
       sandboxes.delete(sid);
+      ownedIds.delete(sid);
       return { ok: true, name };
     }
 
@@ -232,7 +246,13 @@ async function handleMessage(
       const active = getSandbox(sandboxes, sid);
       await active.sandbox.destroy();
       sandboxes.delete(sid);
+      ownedIds.delete(sid);
       return { ok: true };
+    }
+
+    case "listSessions": {
+      const sessions = Array.from(sandboxes.keys());
+      return { ok: true, sessions };
     }
 
     case "listSnapshots": {

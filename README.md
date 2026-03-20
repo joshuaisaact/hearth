@@ -159,6 +159,26 @@ hearth shell my-api             # boot an environment (runs start commands)
 
 The daemon is auto-started if not already running. On macOS with `~/.hearthrc` configured, it connects to the remote daemon over WebSocket. The host terminal is set to raw mode — keystrokes are forwarded directly, Ctrl-C/Ctrl-D work as expected, and window resizes propagate via SIGWINCH.
 
+## Checkpoint and Rollback
+
+Save a running sandbox's state without stopping it. Rollback by starting a new session from the checkpoint.
+
+```bash
+# Terminal 1: working in a sandbox
+hearth shell my-api
+
+# Terminal 2: save state
+hearth checkpoint before-refactor        # ~400ms
+
+# Terminal 2: save again later
+hearth checkpoint after-tests-pass
+
+# If things go wrong, rollback by starting from the checkpoint
+hearth shell before-refactor
+```
+
+Checkpoints are full VM snapshots (memory + disk). Restoring one gives you the exact state at checkpoint time — files, processes, everything.
+
 ## API
 
 ### `Sandbox.create()`

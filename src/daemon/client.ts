@@ -26,6 +26,7 @@ interface DaemonResponse {
   port?: number;
   name?: string;
   snapshots?: SnapshotInfo[];
+  sessions?: string[];
   event?: string;
   data?: string;
 }
@@ -223,6 +224,10 @@ export class DaemonClient {
     const resp = await this.request({ method: "fromSnapshot", name });
     if (!resp.sandboxId) throw new Error("Daemon did not return sandboxId");
     return new RemoteSandbox(this, resp.sandboxId);
+  }
+
+  listSessions(): Promise<string[]> {
+    return this.request({ method: "listSessions" }).then((r) => r.sessions ?? []);
   }
 
   listSnapshots(): Promise<SnapshotInfo[]> {
