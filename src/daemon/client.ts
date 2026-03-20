@@ -26,6 +26,7 @@ interface DaemonResponse {
   port?: number;
   name?: string;
   snapshots?: SnapshotInfo[];
+  sessions?: string[];
   event?: string;
   data?: string;
 }
@@ -225,6 +226,10 @@ export class DaemonClient {
     return new RemoteSandbox(this, resp.sandboxId);
   }
 
+  listSessions(): Promise<string[]> {
+    return this.request({ method: "listSessions" }).then((r) => r.sessions ?? []);
+  }
+
   listSnapshots(): Promise<SnapshotInfo[]> {
     return this.request({ method: "listSnapshots" }).then((r) => r.snapshots ?? []);
   }
@@ -294,6 +299,7 @@ export class DaemonClient {
       },
       wait: () => exitPromise,
       kill: () => {},
+      keepalive: () => {},
     };
   }
 
@@ -329,6 +335,11 @@ export class DaemonClient {
   /** @internal */
   _enableInternet(sandboxId: string): Promise<void> {
     return this.request({ method: "enableInternet", sandboxId }).then(() => {});
+  }
+
+  /** @internal */
+  _checkpoint(sandboxId: string, name: string): Promise<string> {
+    return this.request({ method: "checkpoint", sandboxId, name }).then((r) => r.name ?? name);
   }
 
   /** @internal */
@@ -388,6 +399,10 @@ export class RemoteSandbox {
 
   enableInternet(): Promise<void> {
     return this.client._enableInternet(this.sandboxId);
+  }
+
+  checkpoint(name: string): Promise<string> {
+    return this.client._checkpoint(this.sandboxId, name);
   }
 
   snapshot(name: string): Promise<string> {

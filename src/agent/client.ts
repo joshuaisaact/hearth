@@ -4,6 +4,9 @@ import { EventEmitter } from "node:events";
 import { AgentError } from "../errors.js";
 import { encodeMessage } from "../util.js";
 
+/** Exit code returned when the socket is closed before the spawn exits (128 + SIGKILL). */
+const EXIT_KILLED = 137;
+
 export interface SpawnHandle {
   stdout: EventEmitter;
   stderr: EventEmitter;
@@ -14,6 +17,7 @@ export interface SpawnHandle {
   resize(cols: number, rows: number): void;
   wait(): Promise<{ exitCode: number }>;
   kill(): void;
+  keepalive(): void;
 }
 
 export class AgentClient {
@@ -218,7 +222,14 @@ export class AgentClient {
       processMessages();
     };
 
+    const onClose = () => {
+      socket.removeListener("data", onData);
+      exitResolve({ exitCode: EXIT_KILLED });
+    };
+
     socket.on("data", onData);
+    socket.once("close", onClose);
+    socket.once("error", onClose);
     socket.write(encodeMessage(payload));
 
     return {
@@ -240,9 +251,14 @@ export class AgentClient {
       },
       wait: () => exitPromise,
       kill: () => {
-        // Not yet implemented — the process will exit when its timeout fires,
-        // or when the sandbox is destroyed. A protocol extension is needed
-        // to send kill signals to specific child processes.
+        try {
+          socket.write(encodeMessage({ type: "kill" }));
+        } catch {}
+      },
+      keepalive: () => {
+        try {
+          socket.write(encodeMessage({ type: "keepalive" }));
+        } catch {}
       },
     };
   }

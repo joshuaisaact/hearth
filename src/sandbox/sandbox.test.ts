@@ -193,9 +193,41 @@ describe.skipIf(!hasKvm)("Sandbox", () => {
     }
   }, 60000);
 
+  it("should checkpoint without destroying the sandbox", async () => {
+    sandbox = await Sandbox.create();
+    await sandbox.writeFile("/tmp/state.txt", "before-checkpoint");
+
+    const snapName = `test-checkpoint-${Date.now()}`;
+
+    try {
+      // Checkpoint — sandbox should stay alive
+      await sandbox.checkpoint(snapName);
+
+      // Verify sandbox is still usable after checkpoint
+      const result = await sandbox.exec("cat /tmp/state.txt");
+      expect(result.stdout).toBe("before-checkpoint");
+
+      // Mutate state after checkpoint
+      await sandbox.writeFile("/tmp/state.txt", "after-checkpoint");
+      const mutated = await sandbox.exec("cat /tmp/state.txt");
+      expect(mutated.stdout).toBe("after-checkpoint");
+
+      // Restore from checkpoint — should get pre-mutation state
+      const restored = await Sandbox.fromSnapshot(snapName);
+      try {
+        const restoredResult = await restored.exec("cat /tmp/state.txt");
+        expect(restoredResult.stdout).toBe("before-checkpoint");
+      } finally {
+        await restored.destroy();
+      }
+    } finally {
+      Sandbox.deleteSnapshot(snapName);
+    }
+  }, 60000);
+
   it("should reject invalid snapshot names", async () => {
     sandbox = await Sandbox.create();
-    await expect(sandbox.snapshot("bad name!")).rejects.toThrow("alphanumeric");
+    await expect(sandbox.snapshot("bad name!")).rejects.toThrow("Invalid snapshot name");
   }, 30000);
 
   it("should throw on missing snapshot", async () => {

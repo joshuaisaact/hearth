@@ -225,17 +225,71 @@ export function createThinSnapshotFrom(sandboxId: string, sourceThinId: number):
   }
 }
 
+/** Read the thin ID from an activated dm-thin device. */
+function readThinId(devName: string): number | null {
+  try {
+    const table = execFileSync("dmsetup", ["table", devName], { stdio: "pipe" }).toString();
+    const id = parseInt(table.split(" ").pop() ?? "", 10);
+    return isNaN(id) ? null : id;
+  } catch {
+    return null;
+  }
+}
+
+/** Get the thin ID for a sandbox's thin device. */
+export function getThinId(sandboxId: string): number | null {
+  return readThinId(`${POOL_NAME}-sb-${sandboxId}`);
+}
+
 /** Destroy a thin snapshot. */
 export function destroyThinSnapshot(sandboxId: string): void {
   const devName = `${POOL_NAME}-sb-${sandboxId}`;
   try {
-    // Get the thin ID before removing
-    const table = execFileSync("dmsetup", ["table", devName], { stdio: "pipe" }).toString();
-    const thinId = parseInt(table.split(" ").pop() ?? "", 10);
-
+    const thinId = readThinId(devName);
     execFileSync("dmsetup", ["remove", devName], { stdio: "pipe" });
+    if (thinId !== null) {
+      execFileSync("dmsetup", ["message", POOL_NAME, "0", `delete ${thinId}`], { stdio: "pipe" });
+    }
+  } catch {}
+}
 
-    if (!isNaN(thinId)) {
+/**
+ * Create a persistent thin snapshot for a user snapshot (checkpoint/snapshot).
+ * Activated under hearth-pool-snap-<name> so allocateThinId() sees it.
+ * Returns the thin ID, or null on failure.
+ */
+export function createSnapshotThin(snapshotName: string, sourceThinId: number): number | null {
+  if (!isThinPoolAvailable()) return null;
+
+  const thinId = allocateThinId();
+  const devName = `${POOL_NAME}-snap-${snapshotName}`;
+
+  try {
+    execFileSync("dmsetup", [
+      "message", POOL_NAME, "0", `create_snap ${thinId} ${sourceThinId}`,
+    ], { stdio: "pipe" });
+
+    const rootfsSectors = getRootfsSectors();
+    execFileSync("dmsetup", [
+      "create", devName,
+      "--table", `0 ${rootfsSectors} thin /dev/mapper/${POOL_NAME} ${thinId}`,
+    ], { stdio: "pipe" });
+
+    return thinId;
+  } catch {
+    try { execFileSync("dmsetup", ["remove", devName], { stdio: "pipe" }); } catch {}
+    try { execFileSync("dmsetup", ["message", POOL_NAME, "0", `delete ${thinId}`], { stdio: "pipe" }); } catch {}
+    return null;
+  }
+}
+
+/** Destroy a persistent snapshot thin device. */
+export function destroySnapshotThin(snapshotName: string): void {
+  const devName = `${POOL_NAME}-snap-${snapshotName}`;
+  try {
+    const thinId = readThinId(devName);
+    execFileSync("dmsetup", ["remove", devName], { stdio: "pipe" });
+    if (thinId !== null) {
       execFileSync("dmsetup", ["message", POOL_NAME, "0", `delete ${thinId}`], { stdio: "pipe" });
     }
   } catch {}

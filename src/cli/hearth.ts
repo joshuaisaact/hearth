@@ -77,6 +77,9 @@ if (command === "setup") {
 } else if (command === "shell") {
   const { shellCommand } = await import("./shell.js");
   await shellCommand(process.argv.slice(3));
+} else if (command === "checkpoint") {
+  const { checkpointCommand } = await import("./checkpoint.js");
+  await checkpointCommand(process.argv.slice(3));
 } else if (command === "pool") {
   const sub = process.argv[3];
   const { isThinPoolAvailable, getThinPoolStatus, destroyThinPool } = await import("../vm/thin.js");
@@ -105,14 +108,15 @@ if (command === "setup") {
   console.log("Usage: hearth <command>");
   console.log("");
   console.log("Commands:");
-  console.log("  setup    Download and configure all dependencies");
-  console.log("  build    Build an environment from a Hearthfile.toml");
-  console.log("  rebuild  Rebuild an existing environment from scratch");
-  console.log("  envs     List, inspect, or remove environments");
-  console.log("  claude   Launch Claude Code in an isolated sandbox");
-  console.log("  shell    Start an interactive shell in a sandbox");
-  console.log("  daemon   Start the Hearth daemon (for multi-process/remote access)");
-  console.log("  connect  Configure remote daemon connection (hearth connect <host>)");
-  console.log("  pool     Manage dm-thin snapshot pool (status, destroy)");
+  console.log("  setup       Download and configure all dependencies");
+  console.log("  build       Build an environment from a Hearthfile.toml");
+  console.log("  rebuild     Rebuild an existing environment from scratch");
+  console.log("  envs        List, inspect, or remove environments");
+  console.log("  claude      Launch Claude Code in an isolated sandbox");
+  console.log("  shell       Start an interactive shell in a sandbox");
+  console.log("  checkpoint  Save a running sandbox's state (restore with 'hearth claude <name>')");
+  console.log("  daemon      Start the Hearth daemon (for multi-process/remote access)");
+  console.log("  connect     Configure remote daemon connection (hearth connect <host>)");
+  console.log("  pool        Manage dm-thin snapshot pool (status, destroy)");
   process.exit(command ? 1 : 0);
 }
