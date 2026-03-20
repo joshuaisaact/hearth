@@ -117,7 +117,8 @@ export async function shellCommand(args: string[]): Promise<void> {
   const cols = process.stdout.columns || 80;
   const rows = process.stdout.rows || 24;
 
-  const shellCmd = shellCwd ? `cd ${shellCwd} && /bin/bash -l` : "/bin/bash -l";
+  const shellEscape = (v: string) => "'" + v.replace(/'/g, "'\\''") + "'";
+  const shellCmd = shellCwd ? `cd -- ${shellEscape(shellCwd)} && /bin/bash -l` : "/bin/bash -l";
   const handle: SpawnHandle = sandbox.spawn(shellCmd, {
     interactive: true,
     cols,

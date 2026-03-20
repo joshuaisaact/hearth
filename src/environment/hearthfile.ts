@@ -21,7 +21,7 @@ export interface Hearthfile {
   github_token_env?: string;
 }
 
-const SNAPSHOT_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+export const SNAPSHOT_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 
 export function parseHearthfile(path: string): Hearthfile {
   const raw = readFileSync(path, "utf-8");

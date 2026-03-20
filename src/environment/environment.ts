@@ -1,11 +1,11 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { existsSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { Sandbox } from "../sandbox/sandbox.js";
 import { buildEnvironment } from "./build.js";
 import { startEnvironment, type StartResult } from "./start.js";
 import { readEnvironmentMeta, isEnvironment, type EnvironmentMeta } from "./metadata.js";
-import { resolveWorkdir, type Hearthfile } from "./hearthfile.js";
+import { resolveWorkdir, SNAPSHOT_NAME_RE, type Hearthfile } from "./hearthfile.js";
 
 function snapshotsDir(): string {
   return join(homedir(), ".hearth", "snapshots");
@@ -29,8 +29,13 @@ export class Environment {
    */
   static async start(name: string): Promise<{ sandbox: Sandbox } & StartResult> {
     const sandbox = await Sandbox.fromSnapshot(name);
-    const result = await startEnvironment({ name, sandbox });
-    return { sandbox, ...result };
+    try {
+      const result = await startEnvironment({ name, sandbox });
+      return { sandbox, ...result };
+    } catch (err) {
+      await sandbox.destroy().catch(() => {});
+      throw err;
+    }
   }
 
   /**
@@ -53,8 +58,18 @@ export class Environment {
     if (!meta) {
       throw new Error(`"${name}" is not an environment or doesn't exist`);
     }
-    rmSync(snapDir, { recursive: true, force: true });
-    await Environment.build(meta.hearthfile);
+    const backupDir = snapDir + ".bak";
+    renameSync(snapDir, backupDir);
+    try {
+      await Environment.build(meta.hearthfile);
+      rmSync(backupDir, { recursive: true, force: true });
+    } catch (err) {
+      // Restore backup on failure
+      if (existsSync(backupDir) && !existsSync(snapDir)) {
+        renameSync(backupDir, snapDir);
+      }
+      throw err;
+    }
   }
 
   /** List all built environments. */
@@ -70,9 +85,15 @@ export class Environment {
 
   /** Remove an environment and its snapshot. */
   static remove(name: string): void {
+    if (!SNAPSHOT_NAME_RE.test(name)) {
+      throw new Error(`Invalid environment name: "${name}"`);
+    }
     const snapDir = join(snapshotsDir(), name);
     if (!existsSync(snapDir)) {
       throw new Error(`Environment "${name}" not found`);
+    }
+    if (!isEnvironment(join(snapshotsDir(), name))) {
+      throw new Error(`"${name}" is a snapshot, not an environment`);
     }
     rmSync(snapDir, { recursive: true, force: true });
   }

@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { readEnvironmentMeta, isEnvironment } from "../environment/metadata.js";
+import { SNAPSHOT_NAME_RE } from "../environment/hearthfile.js";
 
 const SNAPSHOTS_DIR = join(homedir(), ".hearth", "snapshots");
 
@@ -73,6 +74,10 @@ function listEnvs(): void {
 }
 
 function removeEnv(name: string): void {
+  if (!SNAPSHOT_NAME_RE.test(name)) {
+    console.error(`Invalid environment name: "${name}"`);
+    process.exit(1);
+  }
   const snapDir = join(SNAPSHOTS_DIR, name);
   if (!existsSync(snapDir)) {
     console.error(`Environment "${name}" not found.`);
@@ -87,6 +92,10 @@ function removeEnv(name: string): void {
 }
 
 function inspectEnv(name: string): void {
+  if (!SNAPSHOT_NAME_RE.test(name)) {
+    console.error(`Invalid environment name: "${name}"`);
+    process.exit(1);
+  }
   const snapDir = join(SNAPSHOTS_DIR, name);
   const meta = readEnvironmentMeta(snapDir);
   if (!meta) {

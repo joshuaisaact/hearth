@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, renameSync, rmSync } from "node:fs";
 import { parseHearthfile, findHearthfile } from "../environment/hearthfile.js";
 import { readEnvironmentMeta } from "../environment/metadata.js";
 import { buildEnvironment } from "../environment/build.js";
@@ -133,11 +133,12 @@ export async function rebuildCommand(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  // Delete existing snapshot
-  rmSync(snapDir, { recursive: true, force: true });
-
   const hf = meta.hearthfile;
   if (branchOverride) hf.branch = branchOverride;
+
+  // Move existing snapshot to backup — restore on failure
+  const backupDir = snapDir + ".bak";
+  renameSync(snapDir, backupDir);
 
   const client = await getClient();
 
@@ -146,6 +147,13 @@ export async function rebuildCommand(args: string[]): Promise<void> {
       hearthfile: hf,
       createSandbox: () => client.create(),
     });
+    rmSync(backupDir, { recursive: true, force: true });
+  } catch (err) {
+    // Restore backup on failure
+    if (existsSync(backupDir) && !existsSync(snapDir)) {
+      renameSync(backupDir, snapDir);
+    }
+    throw err;
   } finally {
     client.close();
   }

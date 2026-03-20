@@ -22,7 +22,19 @@ export function readEnvironmentMeta(snapshotDir: string): EnvironmentMeta | null
   const path = join(snapshotDir, META_FILENAME);
   if (!existsSync(path)) return null;
   const raw = readFileSync(path, "utf-8");
-  return parse(raw) as unknown as EnvironmentMeta;
+  const parsed = parse(raw) as Record<string, unknown>;
+
+  if (typeof parsed["name"] !== "string") return null;
+  if (typeof parsed["builtAt"] !== "string") return null;
+  if (typeof parsed["hearthfile"] !== "object" || parsed["hearthfile"] === null) return null;
+
+  return {
+    name: parsed["name"],
+    builtAt: parsed["builtAt"],
+    repo: typeof parsed["repo"] === "string" ? parsed["repo"] : undefined,
+    branch: typeof parsed["branch"] === "string" ? parsed["branch"] : undefined,
+    hearthfile: parsed["hearthfile"] as Hearthfile,
+  };
 }
 
 export function isEnvironment(snapshotDir: string): boolean {

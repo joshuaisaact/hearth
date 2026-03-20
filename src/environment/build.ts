@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Hearthfile } from "./hearthfile.js";
@@ -6,6 +6,37 @@ import { resolveWorkdir } from "./hearthfile.js";
 import { resolveGitHubToken } from "./github.js";
 import { writeEnvironmentMeta } from "./metadata.js";
 import type { ExecResult } from "../sandbox/types.js";
+
+/** Normalize a repo string into a valid git clone URL. */
+function normalizeCloneUrl(repo: string, token: string | null): string {
+  // Already a full URL
+  if (repo.startsWith("https://") || repo.startsWith("http://")) {
+    if (token) {
+      const url = new URL(repo);
+      url.username = "x-access-token";
+      url.password = token;
+      return url.toString();
+    }
+    return repo;
+  }
+
+  // SSH form: git@github.com:user/repo.git
+  if (repo.startsWith("git@")) {
+    if (token) {
+      const match = repo.match(/^git@([^:]+):(.+)$/);
+      if (match) {
+        return `https://x-access-token:${token}@${match[1]}/${match[2]}`;
+      }
+    }
+    return repo;
+  }
+
+  // Bare form: github.com/user/repo
+  if (token) {
+    return `https://x-access-token:${token}@${repo}`;
+  }
+  return `https://${repo}`;
+}
 
 /** Minimal sandbox interface — works with both Sandbox and RemoteSandbox. */
 interface BuildSandbox {
@@ -62,12 +93,10 @@ export async function buildEnvironment(opts: BuildOptions): Promise<void> {
       }
     }
 
-    // Clone repo — embed token in URL for private repos, plain https for public
+    // Clone repo
     if (hf.repo) {
       log(`Cloning ${hf.repo}...`);
-      const cloneUrl = token
-        ? `https://x-access-token:${token}@${hf.repo}`
-        : `https://${hf.repo}`;
+      const cloneUrl = normalizeCloneUrl(hf.repo, token);
       const branchFlag = hf.branch ? ` --branch ${hf.branch}` : "";
       const result = await sandbox.exec(
         `git clone${branchFlag} ${cloneUrl} ${workdir}`,
@@ -80,8 +109,11 @@ export async function buildEnvironment(opts: BuildOptions): Promise<void> {
       // If we used a token in the URL, rewrite the remote to strip it
       // so the snapshot doesn't contain credentials
       if (token) {
+        const cleanUrl = hf.repo.startsWith("https://") || hf.repo.startsWith("http://")
+          ? new URL(hf.repo).origin + new URL(hf.repo).pathname
+          : hf.repo.startsWith("git@") ? hf.repo : `https://${hf.repo}`;
         await sandbox.exec(
-          `git -C ${workdir} remote set-url origin https://${hf.repo}`,
+          `git -C ${workdir} remote set-url origin ${cleanUrl}`,
         );
       }
     } else {
@@ -118,6 +150,10 @@ export async function buildEnvironment(opts: BuildOptions): Promise<void> {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     log(`Built "${hf.name}" in ${elapsed}s`);
   } catch (err) {
+    // Clean up orphaned snapshot directory (created by snapshot() before metadata write)
+    if (existsSync(snapDir)) {
+      rmSync(snapDir, { recursive: true, force: true });
+    }
     // Clean up on failure
     await sandbox.destroy().catch(() => {});
     throw err;

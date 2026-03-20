@@ -150,16 +150,20 @@ export async function claudeCommand(args: string[]): Promise<void> {
   // Ensure agent user owns their home directory
   await sandbox.exec("chown -R agent:agent /home/agent");
 
-  // Set up proxy env vars in .bashrc for the agent user
-  const bashrc = [
+  // Set up proxy env vars in a separate file, sourced from .bashrc
+  const claudeEnv = [
     "export PATH=\"$HOME/.claude/bin:$PATH\"",
     "export HTTP_PROXY=http://127.0.0.1:3128",
     "export HTTPS_PROXY=http://127.0.0.1:3128",
     "export http_proxy=http://127.0.0.1:3128",
     "export https_proxy=http://127.0.0.1:3128",
   ].join("\n");
-  await sandbox.exec("test -f /home/agent/.bashrc || true");
-  await sandbox.writeFile("/home/agent/.bashrc", bashrc);
+  await sandbox.writeFile("/home/agent/.hearth-claude.env", claudeEnv);
+  await sandbox.exec(
+    "touch /home/agent/.bashrc && " +
+    "grep -qxF 'source /home/agent/.hearth-claude.env' /home/agent/.bashrc || " +
+    "printf '\\nsource /home/agent/.hearth-claude.env\\n' >> /home/agent/.bashrc",
+  );
 
   // Inject host credentials into the VM
   await sandbox.exec("mkdir -p /home/agent/.claude");
@@ -186,12 +190,13 @@ export async function claudeCommand(args: string[]): Promise<void> {
   await sandbox.exec("chown -R agent:agent /home/agent");
 
   // Write the startup script
-  const claudeArgsStr = claudeArgs.length > 0 ? claudeArgs.join(" ") : "";
+  const shellEscape = (v: string) => "'" + v.replace(/'/g, "'\\''") + "'";
+  const claudeArgsStr = claudeArgs.length > 0 ? claudeArgs.map(shellEscape).join(" ") : "";
   const script = [
     "#!/bin/bash",
     "export HOME=/home/agent",
     "source $HOME/.bashrc",
-    `cd ${workdir}`,
+    `cd -- ${shellEscape(workdir)}`,
     claudeArgsStr
       ? `exec claude ${claudeArgsStr} --dangerously-skip-permissions`
       : "exec claude --dangerously-skip-permissions",

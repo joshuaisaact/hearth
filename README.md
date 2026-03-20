@@ -276,6 +276,70 @@ await using sandbox = await Sandbox.create();
 // sandbox.destroy() called automatically at end of scope
 ```
 
+### `Environment.build(config)`
+
+Build an environment from a `Hearthfile` config object. Boots a sandbox, clones the repo, runs setup commands, and captures a snapshot.
+
+```typescript
+import { Environment } from "hearth";
+import type { Hearthfile } from "hearth";
+
+const config: Hearthfile = {
+  name: "my-api",
+  repo: "github.com/user/my-api",
+  setup: ["npm install"],
+  start: ["npm run dev"],
+  ports: [3000],
+};
+
+await Environment.build(config);
+```
+
+### `Environment.start(name)`
+
+Restore a previously built environment from snapshot. Re-injects credentials, runs start commands, forwards ports. Returns the sandbox and start metadata.
+
+```typescript
+const { sandbox, meta, workdir, ports } = await Environment.start("my-api");
+await sandbox.exec("npm test", { cwd: workdir });
+await sandbox.destroy();
+```
+
+### `Environment.get(config)`
+
+Build-if-needed, then start. Idempotent — if the snapshot already exists, skips the build.
+
+```typescript
+const { sandbox, workdir } = await Environment.get(config);
+```
+
+### `Environment.rebuild(name)`
+
+Delete the existing snapshot and rebuild from the stored Hearthfile. The previous snapshot is backed up and restored if the rebuild fails.
+
+```typescript
+await Environment.rebuild("my-api");
+```
+
+### `Environment.list()`
+
+List all built environments with their metadata.
+
+```typescript
+const envs = Environment.list();
+for (const env of envs) {
+  console.log(`${env.name} — built ${env.builtAt}`);
+}
+```
+
+### `Environment.remove(name)`
+
+Delete an environment and its snapshot.
+
+```typescript
+Environment.remove("my-api");
+```
+
 ## Architecture
 
 ```
