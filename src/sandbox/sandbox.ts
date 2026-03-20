@@ -20,7 +20,10 @@ import {
   SOCKET_NAME,
 } from "../vm/snapshot.js";
 import { startProxy } from "../network/proxy.js";
-import { createThinSnapshot, destroyThinSnapshot, isThinPoolAvailable } from "../vm/thin.js";
+import {
+  createThinSnapshot, createThinSnapshotFrom, destroyThinSnapshot,
+  isThinPoolAvailable, getThinId, createSnapshotThin, destroySnapshotThin,
+} from "../vm/thin.js";
 import { VmBootError } from "../errors.js";
 import { waitForFile, errorMessage } from "../util.js";
 import type { SpawnHandle } from "../agent/client.js";
@@ -106,6 +109,11 @@ export class Sandbox {
   /** Delete a named snapshot. */
   static deleteSnapshot(name: string): void {
     if (name === "base") throw new Error("Cannot delete the base snapshot");
+    // Clean up associated dm-thin snapshot if one exists
+    try {
+      const meta = JSON.parse(readFileSync(join(userSnapshotDir(name), "metadata.json"), "utf-8"));
+      if (typeof meta.thinId === "number") destroySnapshotThin(name);
+    } catch {}
     rmSync(userSnapshotDir(name), { recursive: true, force: true });
   }
 
@@ -118,7 +126,16 @@ export class Sandbox {
     // Try dm-thin for the rootfs (instant CoW), fall back to file copy
     let thinDevice: string | null = null;
     if (isThinPoolAvailable()) {
-      thinDevice = createThinSnapshot(id);
+      // Check if this snapshot has a thin ID (saved from a dm-thin sandbox)
+      let sourceThinId: number | undefined;
+      try {
+        const meta = JSON.parse(readFileSync(join(snapshotDir, "metadata.json"), "utf-8"));
+        if (typeof meta.thinId === "number") sourceThinId = meta.thinId;
+      } catch {}
+
+      thinDevice = sourceThinId !== undefined
+        ? createThinSnapshotFrom(id, sourceThinId)
+        : createThinSnapshot(id);
     }
 
     if (thinDevice) {
@@ -222,26 +239,38 @@ export class Sandbox {
         rename(join(this.runDir, MEMORY_NAME), join(snapDir, MEMORY_NAME)),
       ];
 
-      // rootfs: skip for dm-thin (restored from base volume),
-      // copy if VM stays alive, move if VM is being destroyed
-      if (!this.thinDevice) {
-        if (keepRunning) {
-          ops.push(copyFile(
-            join(this.runDir, ROOTFS_NAME),
-            join(snapDir, ROOTFS_NAME),
-            constants.COPYFILE_FICLONE,
-          ));
-        } else {
-          ops.push(rename(join(this.runDir, ROOTFS_NAME), join(snapDir, ROOTFS_NAME)));
+      // rootfs: dm-thin uses block-level CoW snapshot, file-based uses copy/move
+      let snapshotThinId: number | undefined;
+      if (this.thinDevice) {
+        const sandboxThinId = getThinId(this.sandboxId);
+        if (sandboxThinId === null) {
+          throw new Error("Failed to read thin ID for sandbox");
         }
+        const thinId = createSnapshotThin(name, sandboxThinId);
+        if (thinId === null) {
+          throw new Error("Failed to create thin snapshot for checkpoint");
+        }
+        snapshotThinId = thinId;
+      } else if (keepRunning) {
+        ops.push(copyFile(
+          join(this.runDir, ROOTFS_NAME),
+          join(snapDir, ROOTFS_NAME),
+          constants.COPYFILE_FICLONE,
+        ));
+      } else {
+        ops.push(rename(join(this.runDir, ROOTFS_NAME), join(snapDir, ROOTFS_NAME)));
       }
 
       await Promise.all(ops);
 
-      writeFileSync(
-        join(snapDir, "metadata.json"),
-        JSON.stringify({ name, createdAt: new Date().toISOString() }),
-      );
+      const metadata: Record<string, unknown> = {
+        name,
+        createdAt: new Date().toISOString(),
+      };
+      if (snapshotThinId !== undefined) {
+        metadata.thinId = snapshotThinId;
+      }
+      writeFileSync(join(snapDir, "metadata.json"), JSON.stringify(metadata));
     } catch (err) {
       rmSync(snapDir, { recursive: true, force: true });
       throw new Error(`Failed to create snapshot: ${errorMessage(err)}`);

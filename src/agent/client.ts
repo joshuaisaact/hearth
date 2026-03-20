@@ -232,12 +232,6 @@ export class AgentClient {
     socket.once("error", onClose);
     socket.write(encodeMessage(payload));
 
-    // Send keepalives so the guest agent's idle timeout doesn't trigger.
-    const keepaliveInterval = setInterval(() => {
-      try { socket.write(encodeMessage({ type: "keepalive" })); } catch {}
-    }, 1000);
-    exitPromise.then(() => clearInterval(keepaliveInterval));
-
     return {
       stdout: stdoutEmitter,
       stderr: stderrEmitter,

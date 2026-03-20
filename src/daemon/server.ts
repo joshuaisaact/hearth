@@ -162,12 +162,20 @@ async function handleMessage(
         send({ event: "stderr", spawnId, data });
       });
 
+      // Send keepalives so the guest agent's idle timeout doesn't trigger.
+      // The idle timeout exists to detect stale connections after snapshot restore.
+      const keepalive = setInterval(() => handle.keepalive(), 1000);
+
+      const clearSpawn = () => {
+        clearInterval(keepalive);
+        active.spawns.delete(spawnId);
+      };
       handle.wait().then(({ exitCode }) => {
         send({ event: "exit", spawnId, exitCode });
-        active.spawns.delete(spawnId);
+        clearSpawn();
       }).catch(() => {
         send({ event: "exit", spawnId, exitCode: 1 });
-        active.spawns.delete(spawnId);
+        clearSpawn();
       });
 
       return { ok: true, spawnId };
