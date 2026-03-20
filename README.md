@@ -248,9 +248,28 @@ const { host, port } = await sandbox.forwardPort(8080);
 const resp = await fetch(`http://${host}:${port}/index.html`);
 ```
 
+### `sandbox.checkpoint(name)`
+
+Save the current sandbox state as a named snapshot **without destroying the VM**. The sandbox remains running and usable. This is the core primitive for branching and rollback workflows.
+
+```typescript
+const sandbox = await Sandbox.create();
+await sandbox.exec("npm install", { cwd: "/workspace" });
+
+// Save state — sandbox keeps running
+await sandbox.checkpoint("before-refactor");
+
+// Try something risky
+await sandbox.exec("rm -rf src && rewrite-everything");
+
+// Oops — restore the checkpoint (new sandbox, old state)
+await sandbox.destroy();
+const rollback = await Sandbox.fromSnapshot("before-refactor");
+```
+
 ### `sandbox.snapshot(name)`
 
-Capture the current sandbox state as a named snapshot. The sandbox is destroyed after snapshotting. Restore from it later with `Sandbox.fromSnapshot()`.
+Capture the current sandbox state as a named snapshot. The sandbox is destroyed after snapshotting. Restore from it later with `Sandbox.fromSnapshot()`. Use `checkpoint()` instead if you want to keep the sandbox running.
 
 ```typescript
 const setup = await Sandbox.create();
@@ -487,7 +506,9 @@ See [examples/claude-in-sandbox.ts](examples/claude-in-sandbox.ts) for a complet
 
 **v0.3**: Prebuilt agent binaries, dm-thin instant snapshots.
 
-**v0.5 (current)**: Environments — declarative `Hearthfile.toml`, `hearth build`/`rebuild`/`envs`, environment-aware `hearth claude` and `hearth shell`.
+**v0.5**: Environments — declarative `Hearthfile.toml`, `hearth build`/`rebuild`/`envs`, environment-aware `hearth claude` and `hearth shell`.
+
+**v0.6 (current)**: Checkpoint — `sandbox.checkpoint()` saves VM state without destroying the sandbox, enabling rollback and branching workflows for agents.
 
 See [docs/exec-plans/](docs/exec-plans/) for detailed execution plans.
 

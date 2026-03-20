@@ -332,6 +332,11 @@ export class DaemonClient {
   }
 
   /** @internal */
+  _checkpoint(sandboxId: string, name: string): Promise<string> {
+    return this.request({ method: "checkpoint", sandboxId, name }).then((r) => r.name ?? name);
+  }
+
+  /** @internal */
   _snapshot(sandboxId: string, name: string): Promise<string> {
     return this.request({ method: "snapshot", sandboxId, name }).then((r) => r.name ?? name);
   }
@@ -388,6 +393,10 @@ export class RemoteSandbox {
 
   enableInternet(): Promise<void> {
     return this.client._enableInternet(this.sandboxId);
+  }
+
+  checkpoint(name: string): Promise<string> {
+    return this.client._checkpoint(this.sandboxId, name);
   }
 
   snapshot(name: string): Promise<string> {

@@ -212,6 +212,13 @@ async function handleMessage(
       return { ok: true };
     }
 
+    case "checkpoint": {
+      const sid = requireStr(msg.sandboxId, "sandboxId");
+      const active = getSandbox(sandboxes, sid);
+      const name = await active.sandbox.checkpoint(requireStr(msg.name, "name"));
+      return { ok: true, name };
+    }
+
     case "snapshot": {
       const sid = requireStr(msg.sandboxId, "sandboxId");
       const active = getSandbox(sandboxes, sid);

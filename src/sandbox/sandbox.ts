@@ -196,38 +196,44 @@ export class Sandbox {
   }
 
   /**
-   * Capture the current sandbox state as a named snapshot.
-   * The sandbox is destroyed after snapshotting (Firecracker pauses the VM).
-   * Returns the snapshot name.
+   * Save snapshot artifacts to a named directory.
+   * VM must already be paused. Caller handles resume/destroy.
+   *
+   * @param keepRunning - If true, copies rootfs (VM keeps using it).
+   *                      If false, moves rootfs (faster, VM being destroyed).
    */
-  async snapshot(name: string): Promise<string> {
-    this.ensureAlive();
-
+  private async saveSnapshotArtifacts(name: string, keepRunning: boolean): Promise<string> {
     const snapDir = userSnapshotDir(name);
     if (existsSync(snapDir)) {
       throw new Error(`Snapshot "${name}" already exists`);
     }
-
-    // Pause first — if this fails, the sandbox is still usable
-    await this.api.pause();
-
-    // Close agent and port forwards after pause succeeded
-    for (const s of this.portForwardServers) {
-      try { s.close(); } catch {}
-    }
-    this.agent.close();
 
     mkdirSync(snapDir, { recursive: true });
 
     try {
       await this.api.createSnapshot(VMSTATE_NAME, MEMORY_NAME);
 
-      // Rename (move) files from runDir to snapDir — O(1) on same filesystem
-      await Promise.all([
-        rename(join(this.runDir, ROOTFS_NAME), join(snapDir, ROOTFS_NAME)),
+      // vmstate + memory: always move (VM doesn't read these after resume)
+      const ops: Promise<void>[] = [
         rename(join(this.runDir, VMSTATE_NAME), join(snapDir, VMSTATE_NAME)),
         rename(join(this.runDir, MEMORY_NAME), join(snapDir, MEMORY_NAME)),
-      ]);
+      ];
+
+      // rootfs: skip for dm-thin (restored from base volume),
+      // copy if VM stays alive, move if VM is being destroyed
+      if (!this.thinDevice) {
+        if (keepRunning) {
+          ops.push(copyFile(
+            join(this.runDir, ROOTFS_NAME),
+            join(snapDir, ROOTFS_NAME),
+            constants.COPYFILE_FICLONE,
+          ));
+        } else {
+          ops.push(rename(join(this.runDir, ROOTFS_NAME), join(snapDir, ROOTFS_NAME)));
+        }
+      }
+
+      await Promise.all(ops);
 
       writeFileSync(
         join(snapDir, "metadata.json"),
@@ -238,7 +244,60 @@ export class Sandbox {
       throw new Error(`Failed to create snapshot: ${errorMessage(err)}`);
     }
 
-    this.destroySync();
+    return name;
+  }
+
+  /**
+   * Checkpoint the current sandbox state as a named snapshot.
+   * The sandbox remains running and usable after this call.
+   * Returns the snapshot name.
+   */
+  async checkpoint(name: string): Promise<string> {
+    this.ensureAlive();
+
+    await this.api.pause();
+
+    try {
+      await this.saveSnapshotArtifacts(name, true);
+    } catch (err) {
+      await this.api.resume().catch(() => {});
+      throw err;
+    }
+
+    await this.api.resume();
+
+    // createSnapshot resets the vsock device, so the old connection is dead.
+    // Close it and wait for the guest agent to reconnect.
+    this.agent.close();
+    this.agent = new AgentClient(this.vsockPath);
+    await this.agent.waitForConnection(10000);
+    await this.agent.ping();
+
+    return name;
+  }
+
+  /**
+   * Capture the current sandbox state as a named snapshot.
+   * The sandbox is destroyed after snapshotting.
+   * Returns the snapshot name.
+   */
+  async snapshot(name: string): Promise<string> {
+    this.ensureAlive();
+
+    await this.api.pause();
+
+    // Close connections — VM is being destroyed
+    for (const s of this.portForwardServers) {
+      try { s.close(); } catch {}
+    }
+    this.agent.close();
+
+    try {
+      await this.saveSnapshotArtifacts(name, false);
+    } finally {
+      this.destroySync();
+    }
+
     return name;
   }
 

@@ -35,6 +35,7 @@ Manages Firecracker processes. Handles:
 Copy-on-write snapshot system. Supports:
 - Full VM snapshots (memory + disk state)
 - Restore from snapshot into a new Sandbox
+- **Checkpoint**: save state without destroying the VM — enables rollback and branching
 - Snapshot diffing for incremental saves
 - Base image layering (rootfs → overlay → snapshot)
 
