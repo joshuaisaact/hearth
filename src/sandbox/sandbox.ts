@@ -24,7 +24,7 @@ import {
   createThinSnapshot, createThinSnapshotFrom, destroyThinSnapshot,
   isThinPoolAvailable, getThinId, createSnapshotThin, destroySnapshotThin,
 } from "../vm/thin.js";
-import { VmBootError } from "../errors.js";
+import { VmBootError, TimeoutError } from "../errors.js";
 import { waitForFile, errorMessage } from "../util.js";
 import type { SpawnHandle } from "../agent/client.js";
 import type { SnapshotInfo, ExecResult, ExecOptions, SpawnOptions } from "./types.js";
@@ -379,12 +379,19 @@ export class Sandbox {
     // a brief window where the host proxy is listening but the guest
     // TCP listener isn't yet accepting connections.
     const portHex = PROXY_GUEST_PORT.toString(16).toUpperCase().padStart(4, "0");
+    let proxyReady = false;
     for (let i = 0; i < 40; i++) {
       const check = await this.agent.exec(
         `grep -q '0100007F:${portHex}' /proc/net/tcp 2>/dev/null`,
       );
-      if (check.exitCode === 0) break;
+      if (check.exitCode === 0) {
+        proxyReady = true;
+        break;
+      }
       await new Promise((r) => setTimeout(r, 50));
+    }
+    if (!proxyReady) {
+      throw new TimeoutError("Guest proxy bridge did not start within 2s");
     }
 
     this.internetEnabled = true;
