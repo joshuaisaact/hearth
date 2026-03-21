@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Hearthfile } from "./hearthfile.js";
 import { resolveWorkdir } from "./hearthfile.js";
 import { resolveGitHubToken } from "./github.js";
+import { loadDefaults, mergeDefaults } from "./defaults.js";
 import { writeEnvironmentMeta } from "./metadata.js";
 import type { ExecResult } from "../sandbox/types.js";
 
@@ -63,8 +64,12 @@ export async function buildEnvironment(opts: BuildOptions): Promise<void> {
     throw new Error(`Environment "${hf.name}" already exists. Use 'hearth rebuild ${hf.name}' to rebuild.`);
   }
 
-  const workdir = resolveWorkdir(hf);
-  const token = hf.repo ? resolveGitHubToken(hf) : null;
+  // Merge user-level defaults for build execution (original hf is persisted in metadata)
+  const defaults = loadDefaults();
+  const merged = mergeDefaults(hf, defaults);
+
+  const workdir = resolveWorkdir(merged);
+  const token = merged.repo ? resolveGitHubToken(merged) : null;
 
   log(`Building environment "${hf.name}"...`);
   const startTime = Date.now();
@@ -75,8 +80,8 @@ export async function buildEnvironment(opts: BuildOptions): Promise<void> {
     await sandbox.enableInternet();
 
     // Inject files from host
-    if (hf.files) {
-      for (const f of hf.files) {
+    if (merged.files) {
+      for (const f of merged.files) {
         const from = f.from.replace(/^~/, homedir());
         if (!existsSync(from)) {
           throw new Error(`File not found on host: ${f.from} (resolved to ${from})`);
@@ -94,10 +99,10 @@ export async function buildEnvironment(opts: BuildOptions): Promise<void> {
     }
 
     // Clone repo
-    if (hf.repo) {
-      log(`Cloning ${hf.repo}...`);
-      const cloneUrl = normalizeCloneUrl(hf.repo, token);
-      const branchFlag = hf.branch ? ` --branch ${hf.branch}` : "";
+    if (merged.repo) {
+      log(`Cloning ${merged.repo}...`);
+      const cloneUrl = normalizeCloneUrl(merged.repo, token);
+      const branchFlag = merged.branch ? ` --branch ${merged.branch}` : "";
       const result = await sandbox.exec(
         `git clone${branchFlag} ${cloneUrl} ${workdir}`,
         { timeout: 120_000 },
@@ -109,9 +114,9 @@ export async function buildEnvironment(opts: BuildOptions): Promise<void> {
       // If we used a token in the URL, rewrite the remote to strip it
       // so the snapshot doesn't contain credentials
       if (token) {
-        const cleanUrl = hf.repo.startsWith("https://") || hf.repo.startsWith("http://")
-          ? new URL(hf.repo).origin + new URL(hf.repo).pathname
-          : hf.repo.startsWith("git@") ? hf.repo : `https://${hf.repo}`;
+        const cleanUrl = merged.repo.startsWith("https://") || merged.repo.startsWith("http://")
+          ? new URL(merged.repo).origin + new URL(merged.repo).pathname
+          : merged.repo.startsWith("git@") ? merged.repo : `https://${merged.repo}`;
         await sandbox.exec(
           `git -C ${workdir} remote set-url origin ${cleanUrl}`,
         );
@@ -122,8 +127,8 @@ export async function buildEnvironment(opts: BuildOptions): Promise<void> {
     }
 
     // Run setup commands
-    if (hf.setup) {
-      for (const cmd of hf.setup) {
+    if (merged.setup) {
+      for (const cmd of merged.setup) {
         log(`> ${cmd}`);
         const result = await sandbox.exec(cmd, { cwd: workdir, timeout: 300_000 });
         if (result.stdout) process.stdout.write(result.stdout);
@@ -138,7 +143,8 @@ export async function buildEnvironment(opts: BuildOptions): Promise<void> {
     log("Snapshotting...");
     await sandbox.snapshot(hf.name);
 
-    // Write environment metadata alongside the snapshot
+    // Write environment metadata with the ORIGINAL hearthfile (not merged)
+    // so defaults are re-applied fresh on every build/start
     writeEnvironmentMeta(snapDir, {
       name: hf.name,
       repo: hf.repo,

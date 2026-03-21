@@ -23,6 +23,33 @@ export interface Hearthfile {
 
 export const SNAPSHOT_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 
+/** Parse a 'setup' field from a TOML record. */
+export function parseSetupField(parsed: Record<string, unknown>, label: string): string[] | undefined {
+  if (parsed["setup"] === undefined) return undefined;
+  if (!Array.isArray(parsed["setup"]) || !parsed["setup"].every((s) => typeof s === "string")) {
+    throw new Error(`${label}: 'setup' must be an array of strings`);
+  }
+  return parsed["setup"] as string[];
+}
+
+/** Parse a 'files' field from a TOML record. */
+export function parseFilesField(parsed: Record<string, unknown>, label: string): HearthfileFiles[] | undefined {
+  if (parsed["files"] === undefined) return undefined;
+  if (!Array.isArray(parsed["files"])) throw new Error(`${label}: 'files' must be an array of tables`);
+  return (parsed["files"] as unknown[]).map((f, i) => {
+    if (typeof f !== "object" || f === null) throw new Error(`${label}: files[${i}] must be a table`);
+    const obj = f as Record<string, unknown>;
+    if (typeof obj["from"] !== "string") throw new Error(`${label}: files[${i}].from must be a string`);
+    if (typeof obj["to"] !== "string") throw new Error(`${label}: files[${i}].to must be a string`);
+    const entry: HearthfileFiles = { from: obj["from"], to: obj["to"] };
+    if (obj["mode"] !== undefined) {
+      if (typeof obj["mode"] !== "string") throw new Error(`${label}: files[${i}].mode must be a string`);
+      entry.mode = obj["mode"];
+    }
+    return entry;
+  });
+}
+
 export function parseHearthfile(path: string): Hearthfile {
   const raw = readFileSync(path, "utf-8");
   const parsed = parse(raw) as Record<string, unknown>;
@@ -52,12 +79,8 @@ export function parseHearthfile(path: string): Hearthfile {
     hf.workdir = parsed["workdir"];
   }
 
-  if (parsed["setup"] !== undefined) {
-    if (!Array.isArray(parsed["setup"]) || !parsed["setup"].every((s) => typeof s === "string")) {
-      throw new Error("Hearthfile: 'setup' must be an array of strings");
-    }
-    hf.setup = parsed["setup"] as string[];
-  }
+  const setup = parseSetupField(parsed, "Hearthfile");
+  if (setup) hf.setup = setup;
 
   if (parsed["start"] !== undefined) {
     if (!Array.isArray(parsed["start"]) || !parsed["start"].every((s) => typeof s === "string")) {
@@ -82,19 +105,8 @@ export function parseHearthfile(path: string): Hearthfile {
     hf.ready = parsed["ready"];
   }
 
-  if (parsed["files"] !== undefined) {
-    if (!Array.isArray(parsed["files"])) throw new Error("Hearthfile: 'files' must be an array of tables");
-    hf.files = (parsed["files"] as Record<string, unknown>[]).map((f, i) => {
-      if (typeof f["from"] !== "string") throw new Error(`Hearthfile: files[${i}].from must be a string`);
-      if (typeof f["to"] !== "string") throw new Error(`Hearthfile: files[${i}].to must be a string`);
-      const entry: HearthfileFiles = { from: f["from"], to: f["to"] };
-      if (f["mode"] !== undefined) {
-        if (typeof f["mode"] !== "string") throw new Error(`Hearthfile: files[${i}].mode must be a string`);
-        entry.mode = f["mode"];
-      }
-      return entry;
-    });
-  }
+  const files = parseFilesField(parsed, "Hearthfile");
+  if (files) hf.files = files;
 
   if (parsed["github_token_env"] !== undefined) {
     if (typeof parsed["github_token_env"] !== "string") throw new Error("Hearthfile: 'github_token_env' must be a string");
