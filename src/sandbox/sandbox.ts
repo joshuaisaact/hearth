@@ -380,7 +380,7 @@ export class Sandbox {
     // TCP listener isn't yet accepting connections.
     for (let i = 0; i < 40; i++) {
       const check = await this.agent.exec(
-        "grep -q '00000000:0C38' /proc/net/tcp 2>/dev/null",
+        "grep -q '0100007F:0C38' /proc/net/tcp 2>/dev/null",
       );
       if (check.exitCode === 0) break;
       await new Promise((r) => setTimeout(r, 50));
