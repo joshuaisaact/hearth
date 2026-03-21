@@ -200,7 +200,11 @@ export async function claudeCommand(args: string[]): Promise<void> {
   const script = [
     "#!/bin/bash",
     "export HOME=/home/agent",
-    "source $HOME/.bashrc",
+    "export HTTP_PROXY=http://127.0.0.1:3128",
+    "export HTTPS_PROXY=http://127.0.0.1:3128",
+    "export http_proxy=http://127.0.0.1:3128",
+    "export https_proxy=http://127.0.0.1:3128",
+    'export PATH="$HOME/.claude/bin:$PATH"',
     `cd -- ${shellEscape(workdir)}`,
     claudeArgsStr
       ? `exec claude ${claudeArgsStr} --dangerously-skip-permissions`
