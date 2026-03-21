@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-03-21
+
+### Added
+- **Global defaults** (`~/.hearth/defaults.toml`) — define `setup` commands and `files` that get merged into every `hearth build`. No more repeating `npm install -g @anthropic-ai/claude-code` in every Hearthfile.
+- **Shared TOML validators** — `parseSetupField()` and `parseFilesField()` extracted from Hearthfile parsing for reuse.
+
+### Fixed
+- **Proxy race condition** — `enableInternet()` now waits for the guest-side proxy bridge (TCP 3128) to be ready before returning, eliminating intermittent `EAI_AGAIN` DNS errors.
+- **Proxy env in Claude startup** — proxy environment variables are set directly in the startup script instead of relying on `.bashrc` sourcing, which failed because `su -` resets the environment.
+- **Proxy readiness timeout** — `enableInternet()` throws `TimeoutError` if the guest proxy bridge doesn't start within 2s instead of silently proceeding with a broken proxy.
+- **Consolidated proxy constants** — proxy port and URL defined once in `proxy.ts` (`PROXY_GUEST_PORT`, `PROXY_URL`) instead of hardcoded in multiple files.
+
 ## 0.2.0 — 2026-03-18
 
 ### Added
