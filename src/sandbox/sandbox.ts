@@ -373,6 +373,19 @@ export class Sandbox {
     if (this.internetEnabled) return;
 
     this.proxyServer = await startProxy(join(this.runDir, VSOCK_NAME));
+
+    // Wait for the guest-side proxy bridge (TCP 3128) to be ready.
+    // The guest agent forks startProxyBridge() asynchronously, so there's
+    // a brief window where the host proxy is listening but the guest
+    // TCP listener isn't yet accepting connections.
+    for (let i = 0; i < 40; i++) {
+      const check = await this.agent.exec(
+        "grep -q '00000000:0C38' /proc/net/tcp 2>/dev/null",
+      );
+      if (check.exitCode === 0) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
     this.internetEnabled = true;
   }
 
