@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { readEnvironmentMeta, type EnvironmentMeta } from "./metadata.js";
 import { resolveWorkdir } from "./hearthfile.js";
 import { resolveGitHubToken } from "./github.js";
+import { loadDefaults } from "./defaults.js";
 import type { ExecResult } from "../sandbox/types.js";
 
 /** Minimal sandbox interface — works with both Sandbox and RemoteSandbox. */
@@ -53,19 +54,19 @@ export async function startEnvironment(opts: StartOptions): Promise<StartResult>
     );
   }
 
-  // Re-inject files
-  if (hf.files) {
-    for (const f of hf.files) {
-      const from = f.from.replace(/^~/, homedir());
-      if (!existsSync(from)) continue; // skip missing files on start (non-fatal)
-      const { readFileSync } = await import("node:fs");
-      const content = readFileSync(from);
-      const dir = f.to.substring(0, f.to.lastIndexOf("/"));
-      if (dir) await sandbox.exec(`mkdir -p ${dir}`);
-      await sandbox.writeFile(f.to, content);
-      if (f.mode) {
-        await sandbox.exec(`chmod ${f.mode} ${f.to}`);
-      }
+  // Re-inject files (project files + user defaults)
+  const defaults = loadDefaults();
+  const allFiles = [...(hf.files ?? []), ...(defaults?.files ?? [])];
+  for (const f of allFiles) {
+    const from = f.from.replace(/^~/, homedir());
+    if (!existsSync(from)) continue; // skip missing files on start (non-fatal)
+    const { readFileSync } = await import("node:fs");
+    const content = readFileSync(from);
+    const dir = f.to.substring(0, f.to.lastIndexOf("/"));
+    if (dir) await sandbox.exec(`mkdir -p ${dir}`);
+    await sandbox.writeFile(f.to, content);
+    if (f.mode) {
+      await sandbox.exec(`chmod ${f.mode} ${f.to}`);
     }
   }
 

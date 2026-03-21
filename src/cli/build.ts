@@ -4,6 +4,7 @@ import { existsSync, renameSync, rmSync } from "node:fs";
 import { parseHearthfile, findHearthfile } from "../environment/hearthfile.js";
 import { readEnvironmentMeta } from "../environment/metadata.js";
 import { buildEnvironment } from "../environment/build.js";
+import { loadDefaults, mergeDefaults } from "../environment/defaults.js";
 import { DaemonClient } from "../daemon/client.js";
 import { resolveConnection } from "../daemon/config.js";
 import { spawn } from "node:child_process";
@@ -98,6 +99,10 @@ export async function buildCommand(args: string[]): Promise<void> {
   if (repoOverride) hf.repo = repoOverride;
   if (branchOverride) hf.branch = branchOverride;
 
+  // Merge user-level defaults
+  const defaults = loadDefaults();
+  hf = mergeDefaults(hf, defaults);
+
   const client = await getClient();
 
   try {
@@ -133,8 +138,12 @@ export async function rebuildCommand(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const hf = meta.hearthfile;
+  let hf = meta.hearthfile;
   if (branchOverride) hf.branch = branchOverride;
+
+  // Merge user-level defaults
+  const defaults = loadDefaults();
+  hf = mergeDefaults(hf, defaults);
 
   // Move existing snapshot to backup — restore on failure
   const backupDir = snapDir + ".bak";

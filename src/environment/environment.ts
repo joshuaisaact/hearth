@@ -6,6 +6,7 @@ import { buildEnvironment } from "./build.js";
 import { startEnvironment, type StartResult } from "./start.js";
 import { readEnvironmentMeta, isEnvironment, type EnvironmentMeta } from "./metadata.js";
 import { resolveWorkdir, SNAPSHOT_NAME_RE, type Hearthfile } from "./hearthfile.js";
+import { loadDefaults, mergeDefaults } from "./defaults.js";
 
 function snapshotsDir(): string {
   return join(homedir(), ".hearth", "snapshots");
@@ -17,8 +18,10 @@ export class Environment {
    * Boots a sandbox, clones the repo, runs setup, and snapshots.
    */
   static async build(config: Hearthfile): Promise<void> {
+    const defaults = loadDefaults();
+    const merged = mergeDefaults(config, defaults);
     await buildEnvironment({
-      hearthfile: config,
+      hearthfile: merged,
       createSandbox: () => Sandbox.create(),
     });
   }
