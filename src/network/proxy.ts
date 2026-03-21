@@ -65,4 +65,9 @@ export function startProxy(vsockUdsPath: string): Promise<net.Server> {
   });
 }
 
+/** TCP port the guest-side proxy bridge listens on. */
+export const PROXY_GUEST_PORT = 3128;
+
+export const PROXY_URL = `http://127.0.0.1:${PROXY_GUEST_PORT}`;
+
 export { PROXY_VSOCK_PORT };

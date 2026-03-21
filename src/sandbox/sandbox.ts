@@ -19,7 +19,7 @@ import {
   VSOCK_NAME,
   SOCKET_NAME,
 } from "../vm/snapshot.js";
-import { startProxy } from "../network/proxy.js";
+import { startProxy, PROXY_URL, PROXY_GUEST_PORT } from "../network/proxy.js";
 import {
   createThinSnapshot, createThinSnapshotFrom, destroyThinSnapshot,
   isThinPoolAvailable, getThinId, createSnapshotThin, destroySnapshotThin,
@@ -374,13 +374,14 @@ export class Sandbox {
 
     this.proxyServer = await startProxy(join(this.runDir, VSOCK_NAME));
 
-    // Wait for the guest-side proxy bridge (TCP 3128) to be ready.
+    // Wait for the guest-side proxy bridge to be ready.
     // The guest agent forks startProxyBridge() asynchronously, so there's
     // a brief window where the host proxy is listening but the guest
     // TCP listener isn't yet accepting connections.
+    const portHex = PROXY_GUEST_PORT.toString(16).toUpperCase().padStart(4, "0");
     for (let i = 0; i < 40; i++) {
       const check = await this.agent.exec(
-        "grep -q '0100007F:0C38' /proc/net/tcp 2>/dev/null",
+        `grep -q '0100007F:${portHex}' /proc/net/tcp 2>/dev/null`,
       );
       if (check.exitCode === 0) break;
       await new Promise((r) => setTimeout(r, 50));
@@ -391,12 +392,11 @@ export class Sandbox {
 
   private mergeProxyEnv(opts?: ExecOptions): ExecOptions | undefined {
     if (!this.internetEnabled) return opts;
-    const proxyUrl = "http://127.0.0.1:3128";
     const proxyEnv = {
-      HTTP_PROXY: proxyUrl,
-      HTTPS_PROXY: proxyUrl,
-      http_proxy: proxyUrl,
-      https_proxy: proxyUrl,
+      HTTP_PROXY: PROXY_URL,
+      HTTPS_PROXY: PROXY_URL,
+      http_proxy: PROXY_URL,
+      https_proxy: PROXY_URL,
     };
     return {
       ...opts,
