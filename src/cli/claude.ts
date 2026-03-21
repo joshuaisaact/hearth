@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 import { CLAUDE_SNAPSHOT_NAME } from "../claude.js";
+import { PROXY_URL } from "../network/proxy.js";
 import { DaemonClient } from "../daemon/client.js";
 import { resolveConnection } from "../daemon/config.js";
 import { isEnvironment } from "../environment/metadata.js";
@@ -158,10 +159,10 @@ export async function claudeCommand(args: string[]): Promise<void> {
   // Set up proxy env vars in a separate file, sourced from .bashrc
   const claudeEnv = [
     "export PATH=\"$HOME/.claude/bin:$PATH\"",
-    "export HTTP_PROXY=http://127.0.0.1:3128",
-    "export HTTPS_PROXY=http://127.0.0.1:3128",
-    "export http_proxy=http://127.0.0.1:3128",
-    "export https_proxy=http://127.0.0.1:3128",
+    `export HTTP_PROXY=${PROXY_URL}`,
+    `export HTTPS_PROXY=${PROXY_URL}`,
+    `export http_proxy=${PROXY_URL}`,
+    `export https_proxy=${PROXY_URL}`,
   ].join("\n");
   await sandbox.writeFile("/home/agent/.hearth-claude.env", claudeEnv);
   await sandbox.exec(
@@ -200,7 +201,11 @@ export async function claudeCommand(args: string[]): Promise<void> {
   const script = [
     "#!/bin/bash",
     "export HOME=/home/agent",
-    "source $HOME/.bashrc",
+    `export HTTP_PROXY=${PROXY_URL}`,
+    `export HTTPS_PROXY=${PROXY_URL}`,
+    `export http_proxy=${PROXY_URL}`,
+    `export https_proxy=${PROXY_URL}`,
+    'export PATH="$HOME/.claude/bin:$PATH"',
     `cd -- ${shellEscape(workdir)}`,
     claudeArgsStr
       ? `exec claude ${claudeArgsStr} --dangerously-skip-permissions`
