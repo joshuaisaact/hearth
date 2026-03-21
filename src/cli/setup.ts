@@ -255,6 +255,15 @@ async function setupRootfs() {
     mkdirSync(extractDir, { recursive: true });
     execFileSync("tar", ["xf", join(tmpDir, "rootfs.tar"), "-C", extractDir], { stdio: "pipe" });
 
+    // Create a 256MB swap file so memory-hungry tools (pnpm, etc.) don't OOM
+    console.log("  rootfs: creating swap file...");
+    execFileSync("dd", [
+      "if=/dev/zero", `of=${join(extractDir, "swapfile")}`,
+      "bs=1M", "count=256",
+    ], { stdio: "pipe" });
+    chmodSync(join(extractDir, "swapfile"), 0o600);
+    execFileSync("mkswap", [join(extractDir, "swapfile")], { stdio: "pipe" });
+
     // Minimal init that mounts essential filesystems and starts the agent
     writeFileSync(
       join(extractDir, "sbin", "init"),
@@ -271,6 +280,7 @@ async function setupRootfs() {
         "hostname hearth",
         "echo '127.0.0.1 localhost hearth' > /etc/hosts",
         "ip link set lo up 2>/dev/null",
+        "swapon /swapfile 2>/dev/null",
         "exec /usr/local/bin/hearth-agent",
         "",
       ].join("\n"),
