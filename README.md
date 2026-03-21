@@ -147,6 +147,24 @@ hearth envs inspect my-api      # show Hearthfile + metadata
 hearth envs rm my-api           # delete environment and snapshot
 ```
 
+### Global defaults
+
+Create `~/.hearth/defaults.toml` to apply setup commands and files to **every** environment build:
+
+```toml
+# Run after the project's setup commands during every `hearth build`
+setup = ["npm install -g @anthropic-ai/claude-code"]
+
+# Inject host files into every environment
+[[files]]
+from = "~/.gitconfig"
+to = "/home/agent/.gitconfig"
+```
+
+Default setup commands run after the project's own setup commands, so project deps are installed first. Default files are also re-injected on every `hearth shell` / `hearth claude` start, just like project-level files.
+
+On `hearth rebuild`, current defaults are always picked up — so changing your defaults and rebuilding is all it takes.
+
 ## Interactive Shell
 
 `hearth shell` drops you into a live bash session inside a sandbox:
