@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterAll } from "vitest";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -128,5 +128,6 @@ describe("mergeDefaults", () => {
   });
 });
 
-// Cleanup
-rmSync(TMP, { recursive: true, force: true });
+afterAll(() => {
+  rmSync(TMP, { recursive: true, force: true });
+});

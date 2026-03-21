@@ -3,20 +3,19 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { parse } from "smol-toml";
 import type { Hearthfile, HearthfileFiles } from "./hearthfile.js";
+import { parseSetupField, parseFilesField } from "./hearthfile.js";
 
 export interface HearthDefaults {
   setup?: string[];
   files?: HearthfileFiles[];
 }
 
-const DEFAULTS_PATH = join(homedir(), ".hearth", "defaults.toml");
-
 /**
  * Load user-level defaults from ~/.hearth/defaults.toml.
  * Returns null if the file doesn't exist.
  */
 export function loadDefaults(path?: string): HearthDefaults | null {
-  const filePath = path ?? DEFAULTS_PATH;
+  const filePath = path ?? join(homedir(), ".hearth", "defaults.toml");
   if (!existsSync(filePath)) return null;
 
   const raw = readFileSync(filePath, "utf-8");
@@ -24,26 +23,11 @@ export function loadDefaults(path?: string): HearthDefaults | null {
 
   const defaults: HearthDefaults = {};
 
-  if (parsed["setup"] !== undefined) {
-    if (!Array.isArray(parsed["setup"]) || !parsed["setup"].every((s) => typeof s === "string")) {
-      throw new Error("defaults.toml: 'setup' must be an array of strings");
-    }
-    defaults.setup = parsed["setup"] as string[];
-  }
+  const setup = parseSetupField(parsed, "defaults.toml");
+  if (setup) defaults.setup = setup;
 
-  if (parsed["files"] !== undefined) {
-    if (!Array.isArray(parsed["files"])) throw new Error("defaults.toml: 'files' must be an array of tables");
-    defaults.files = (parsed["files"] as Record<string, unknown>[]).map((f, i) => {
-      if (typeof f["from"] !== "string") throw new Error(`defaults.toml: files[${i}].from must be a string`);
-      if (typeof f["to"] !== "string") throw new Error(`defaults.toml: files[${i}].to must be a string`);
-      const entry: HearthfileFiles = { from: f["from"], to: f["to"] };
-      if (f["mode"] !== undefined) {
-        if (typeof f["mode"] !== "string") throw new Error(`defaults.toml: files[${i}].mode must be a string`);
-        entry.mode = f["mode"];
-      }
-      return entry;
-    });
-  }
+  const files = parseFilesField(parsed, "defaults.toml");
+  if (files) defaults.files = files;
 
   return defaults;
 }
