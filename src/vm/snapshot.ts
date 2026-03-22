@@ -37,7 +37,7 @@ export function ensureBaseSnapshot(memoryMib: number = DEFAULT_MEMORY_MIB): Prom
     if (baseSnapshotMemoryMib !== null && memoryMib !== baseSnapshotMemoryMib) {
       console.warn(
         `Warning: ignoring memoryMib=${memoryMib}, base snapshot already created with ${baseSnapshotMemoryMib} MiB. ` +
-        `Delete ~/.hearth/snapshots/base to recreate with a different size.`,
+        `Delete ${SNAPSHOT_DIR} to recreate with a different size.`,
       );
     }
     return baseSnapshotReady;
