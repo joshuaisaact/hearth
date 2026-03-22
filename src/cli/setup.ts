@@ -131,54 +131,15 @@ async function setupKernel() {
     return;
   }
 
-  const architecture = fcArch();
-
-  // Build a 5.10 bzImage from source using the Firecracker CI kernel config.
+  // Download pre-built 5.10 bzImage from GitHub releases.
   // We need bzImage format (not ELF vmlinux) because the kernel's own setup header
   // is required for snapshot restore — the ELF loader synthesizes boot_params from
   // scratch, and the synthetic values break resume from HLT after snapshot restore.
   // The 5.10 kernel is used because it has CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y.
-  console.log("  kernel: building 5.10 bzImage from source (requires Docker)...");
-
-  // Download source
-  const kernelVersion = "5.10.245";
-  const srcDir = join(tmpdir(), `linux-${kernelVersion}`);
-  if (!existsSync(join(srcDir, "Makefile"))) {
-    const tarUrl = `https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-${kernelVersion}.tar.xz`;
-    const tarPath = join(tmpdir(), `linux-${kernelVersion}.tar.xz`);
-    console.log(`  kernel: downloading source (linux-${kernelVersion})...`);
-    await download(tarUrl, tarPath);
-    execSync(`tar xf ${tarPath}`, { cwd: tmpdir(), stdio: "pipe" });
-    rmSync(tarPath, { force: true });
-  }
-
-  // Download Firecracker CI config
-  const configUrl = `http://spec.ccfc.min.s3.amazonaws.com/firecracker-ci/v1.15/${architecture}/vmlinux-${kernelVersion}.config`;
-  const { fetchText } = await import("./download.js");
-  const configText = await fetchText(configUrl);
-  writeFileSync(join(srcDir, ".config"), configText);
-
-  // Build bzImage in Docker (host GCC may be too new for 5.10)
-  console.log("  kernel: compiling bzImage (this takes ~2 minutes)...");
-  try {
-    execSync(
-      `docker run --rm -v ${srcDir}:/src -w /src gcc:12 bash -c ` +
-      `'apt-get update -qq && apt-get install -y -qq bc flex bison libelf-dev >/dev/null 2>&1 && make olddefconfig >/dev/null 2>&1 && make -j$(nproc) bzImage'`,
-      { stdio: "pipe", timeout: 600000 },
-    );
-  } catch (err: unknown) {
-    const e = err as { stderr?: Buffer };
-    if (e.stderr) console.error(e.stderr.toString().slice(-500));
-    throw new Error("Kernel build failed. Ensure Docker is available.");
-  }
-
-  const builtPath = join(srcDir, "arch", "x86", "boot", "bzImage");
-  if (!existsSync(builtPath)) {
-    throw new Error("bzImage not found after build");
-  }
-
-  copyFileSync(builtPath, bzImagePath);
-  console.log("  kernel: bzImage built and installed");
+  const url = "https://github.com/joshuaisaact/hearth/releases/download/kernel-5.10.245/bzImage";
+  console.log("  kernel: downloading bzImage 5.10.245...");
+  await download(url, bzImagePath);
+  console.log("  kernel: installed");
 }
 
 async function setupAgent() {
