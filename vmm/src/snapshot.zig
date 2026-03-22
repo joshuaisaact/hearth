@@ -154,7 +154,7 @@ pub fn save(
 }
 
 /// Restore VM state from snapshot files.
-/// KVM VM must be created, irqchip/PIT created, but vCPU registers NOT set.
+/// Memory must already be registered with KVM (Firecracker restore order).
 /// Returns the restored Memory (mmap'd from file, demand-paged).
 pub fn load(
     vmstate_path: [*:0]const u8,
@@ -177,11 +177,13 @@ pub fn load(
     const header = try readHeader(header_buf);
 
     // --- Restore guest memory via demand-paged mmap ---
+    // Register with KVM immediately — Firecracker sets memory BEFORE vCPU state
+    // because LAPIC/MSR state restoration may reference guest memory addresses.
     const mem = try Memory.initFromFile(mem_path, header.mem_size);
     errdefer mem.deinit();
+    try vm.setMemoryRegion(0, 0, mem.alignedMem());
 
-    // --- Restore vCPU state ---
-    // Restore order matters (see PLAN-snapshot.md)
+    // --- Restore vCPU state FIRST (matches Firecracker's order) ---
 
     var mp_state: c.kvm_mp_state = undefined;
     try readExact(state_fd, std.mem.asBytes(&mp_state));
@@ -209,8 +211,9 @@ pub fn load(
     var events: c.kvm_vcpu_events = undefined;
     try readExact(state_fd, std.mem.asBytes(&events));
 
-    // Apply in restore order: CPUID first (determines valid MSRs),
-    // vcpu_events last (contains pending exceptions)
+    // --- Restore vCPU state FIRST (matches Firecracker's order) ---
+    // Memory region must be registered by the caller BEFORE this function.
+    // Order: CPUID → mp_state → regs → sregs → xcrs → LAPIC → MSRs → events
     try vcpu.setCpuid(&cpuid);
     try vcpu.setMpState(&mp_state);
     try vcpu.setRegs(&regs);
@@ -220,22 +223,33 @@ pub fn load(
     try vcpu.setMsrs(&msrs);
     try vcpu.setVcpuEvents(&events);
 
-    // --- Restore VM state ---
+    // KVM_KVMCLOCK_CTRL: notify the host that the guest was paused.
+    // Prevents soft lockup watchdog false positives on resume.
+    // Errors are non-fatal (guest may not support kvmclock).
+    vcpu.kvmclockCtrl() catch {};
+
+    // --- Read VM state from file (in file order: irqchip, PIT, clock) ---
+    var irqchips: [3][Vm.IRQCHIP_SIZE]u8 = undefined;
     for (0..3) |chip_id| {
-        var chip_buf: [Vm.IRQCHIP_SIZE]u8 = undefined;
-        try readExact(state_fd, &chip_buf);
-        // Overwrite chip_id in case it differs — we save/restore by position
-        std.mem.writeInt(u32, chip_buf[0..4], @intCast(chip_id), .little);
-        try vm.setIrqChip(&chip_buf);
+        try readExact(state_fd, &irqchips[chip_id]);
+        std.mem.writeInt(u32, irqchips[chip_id][0..4], @intCast(chip_id), .little);
     }
 
     var pit: c.kvm_pit_state2 = undefined;
     try readExact(state_fd, std.mem.asBytes(&pit));
-    try vm.setPit2(&pit);
+    pit.flags |= c.KVM_PIT_SPEAKER_DUMMY;
 
     var clock: c.kvm_clock_data = undefined;
     try readExact(state_fd, std.mem.asBytes(&clock));
+
+    // --- Apply VM state (Firecracker order: PIT, clock, irqchip) ---
+    // This must come AFTER vCPU state so injected interrupts from
+    // irqchip restore aren't overwritten by vCPU state restore.
+    try vm.setPit2(&pit);
     try vm.setClock(&clock);
+    for (0..3) |i| {
+        try vm.setIrqChip(&irqchips[i]);
+    }
 
     // --- Restore devices ---
     if (header.device_count > virtio.MAX_DEVICES) {

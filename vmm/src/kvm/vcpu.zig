@@ -168,8 +168,8 @@ pub const MsrBuffer = extern struct {
     entries: [MAX_MSR_ENTRIES]c.kvm_msr_entry,
 };
 
-/// The MSR indices we save/restore. This is the minimum set needed for
-/// a Linux guest — syscall entry points, TSC, APIC base, SYSENTER.
+/// The MSR indices we save/restore. Must include all MSRs that the guest
+/// kernel programs during boot — missing any causes hangs on restore.
 /// MSR_IA32_TSC (0x10) must appear before MSR_IA32_TSC_DEADLINE (0x6E0)
 /// in the restore buffer because the deadline is relative to TSC.
 pub const snapshot_msr_indices = [_]u32{
@@ -180,7 +180,15 @@ pub const snapshot_msr_indices = [_]u32{
     0x175, // MSR_IA32_SYSENTER_ESP
     0x176, // MSR_IA32_SYSENTER_EIP
     0x1A0, // MSR_IA32_MISC_ENABLE
+    0x277, // MSR_IA32_CR_PAT
     0x6E0, // MSR_IA32_TSC_DEADLINE — must be after TSC
+    // KVM paravirt clock — critical for guest timekeeping after restore
+    0x4b564d00, // MSR_KVM_WALL_CLOCK_NEW
+    0x4b564d01, // MSR_KVM_SYSTEM_TIME_NEW
+    0x4b564d02, // MSR_KVM_ASYNC_PF_EN
+    0x4b564d03, // MSR_KVM_STEAL_TIME
+    0x4b564d04, // MSR_KVM_PV_EOI_EN
+    // Syscall entry points
     0xC0000081, // MSR_STAR
     0xC0000082, // MSR_LSTAR
     0xC0000083, // MSR_CSTAR
@@ -200,6 +208,12 @@ pub fn getMsrs(self: Self, buf: *MsrBuffer) !void {
 
 pub fn setMsrs(self: Self, buf: *const MsrBuffer) !void {
     try abi.ioctlVoid(self.fd, c.KVM_SET_MSRS, @intFromPtr(buf));
+}
+
+/// Notify KVM that the guest was paused (prevents soft lockup watchdog
+/// false positives on resume). Non-fatal if the guest doesn't support kvmclock.
+pub fn kvmclockCtrl(self: Self) !void {
+    try abi.ioctlVoid(self.fd, 0xAED5, 0); // KVM_KVMCLOCK_CTRL
 }
 
 pub const IoExit = struct {

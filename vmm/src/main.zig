@@ -500,8 +500,8 @@ fn restoreVm(
     var vcpu = try vm.createVcpu(0, vcpu_mmap_size);
     defer vcpu.deinit();
 
-    // 4. Load snapshot — restores vCPU registers, VM state, device transport
-    // state, serial registers, and mmaps guest memory from file
+    // 4. Load snapshot — registers memory with KVM, restores vCPU/VM state,
+    // device transport state, and serial registers
     var serial = Serial.init(1);
     var mem = try snapshot.load(
         vmstate_path,
@@ -514,10 +514,7 @@ fn restoreVm(
     );
     defer mem.deinit();
 
-    // 5. Wire up memory region so KVM can access restored guest RAM
-    try vm.setMemoryRegion(0, 0, mem.alignedMem());
-
-    // 6. Enter run loop — guest resumes execution from where it was paused
+    // 5. Enter run loop — guest resumes execution from where it was paused
     log.info("entering VM run loop (restored)", .{});
     try runLoop(&vcpu, &serial, &vm, &mem, &devices, device_count, .{}, null);
 }
@@ -562,8 +559,6 @@ fn restoreVmWithApi(
     var serial = Serial.init(1);
     var mem = try snapshot.load(vmstate_path, mem_snap_path, &vcpu, &vm, &serial, &devices, &device_count);
     defer mem.deinit();
-
-    try vm.setMemoryRegion(0, 0, mem.alignedMem());
 
     var runtime = VmRuntime{
         .vcpu = &vcpu,
