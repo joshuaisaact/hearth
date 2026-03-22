@@ -90,7 +90,7 @@ if (command === "setup") {
       const sharedPages = ksm.pagesSharing.toLocaleString();
       console.log(`KSM: active — ${ksm.memorySaved} saved (${sharedPages} shared pages, ${ksm.fullScans} full scans)`);
     } else {
-      console.log("KSM: inactive — run hearth setup as root to enable memory deduplication");
+      console.log("KSM: inactive — enable with: echo 1 | sudo tee /sys/kernel/mm/ksm/run");
     }
   } catch {
     console.log("KSM: not available");

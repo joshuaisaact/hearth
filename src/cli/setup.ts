@@ -322,7 +322,7 @@ function setupKsm() {
     if (initKsm()) {
       console.log("  KSM: enabled (kernel same-page merging for memory deduplication)");
     } else {
-      console.log("  KSM: skipped (requires root — sandboxes will still work, but without memory deduplication)");
+      console.log("  KSM: skipped (requires root — enable manually: echo 1 | sudo tee /sys/kernel/mm/ksm/run)");
     }
   } catch {
     console.log("  KSM: not available on this system");

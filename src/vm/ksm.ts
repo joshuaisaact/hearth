@@ -55,7 +55,7 @@ function wrapPermissionError(err: unknown, path: string, value?: string): never 
     ? `echo ${shellQuote(value)} | sudo tee ${shellQuote(path)}`
     : `cat ${shellQuote(path)}`;
   throw new KsmError(
-    `KSM requires root privileges. Run hearth setup with sudo, or manually: ${hint}`,
+    `KSM requires root privileges: ${hint}`,
     { cause: err },
   );
 }
