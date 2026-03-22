@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { enableKsm, getKsmStats, tuneKsm, initKsm } from "./ksm.js";
+import { enableKsm, getKsmStats, tuneKsm, initKsm, VALID_KSM_FILES } from "./ksm.js";
 
 vi.mock("node:fs", () => ({
   readFileSync: vi.fn(),
@@ -115,6 +115,28 @@ describe("name validation", () => {
     stubKsmFiles({ run: "0" });
     enableKsm();
     expect(mockWrite).toHaveBeenCalledWith("/sys/kernel/mm/ksm/run", "1");
+  });
+
+  it("rejects path traversal patterns", () => {
+    expect(VALID_KSM_FILES.test("../../etc/shadow")).toBe(false);
+    expect(VALID_KSM_FILES.test("../passwd")).toBe(false);
+    expect(VALID_KSM_FILES.test("run/../../etc")).toBe(false);
+  });
+
+  it("rejects names with special characters", () => {
+    expect(VALID_KSM_FILES.test("")).toBe(false);
+    expect(VALID_KSM_FILES.test("RUN")).toBe(false);
+    expect(VALID_KSM_FILES.test("pages-shared")).toBe(false);
+    expect(VALID_KSM_FILES.test("run.bak")).toBe(false);
+    expect(VALID_KSM_FILES.test("run ")).toBe(false);
+  });
+
+  it("accepts known KSM sysfs filenames", () => {
+    expect(VALID_KSM_FILES.test("run")).toBe(true);
+    expect(VALID_KSM_FILES.test("pages_shared")).toBe(true);
+    expect(VALID_KSM_FILES.test("pages_to_scan")).toBe(true);
+    expect(VALID_KSM_FILES.test("sleep_millisecs")).toBe(true);
+    expect(VALID_KSM_FILES.test("full_scans")).toBe(true);
   });
 });
 

@@ -5,7 +5,8 @@ const MAX_PAGES_TO_SCAN = 10000;
 const MAX_SLEEP_MS = 1000;
 
 const KSM_BASE = "/sys/kernel/mm/ksm";
-const VALID_KSM_FILES = /^[a-z_]+$/;
+/** @internal Exported for testing only. */
+export const VALID_KSM_FILES = /^[a-z_]+$/;
 
 export interface KsmStats {
   /** Number of page slots shared (deduplicated originals). */
