@@ -16,20 +16,6 @@ export class KsmError extends HearthError {
   }
 }
 
-export class KsmPermissionError extends KsmError {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = "KsmPermissionError";
-  }
-}
-
-export class KsmParseError extends KsmError {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = "KsmParseError";
-  }
-}
-
 export interface KsmStats {
   /** Number of page slots shared (deduplicated originals). */
   pagesShared: number;
@@ -68,7 +54,7 @@ function wrapPermissionError(err: unknown, path: string, value?: string): never 
   const hint = value !== undefined
     ? `echo ${shellQuote(value)} | sudo tee ${shellQuote(path)}`
     : `cat ${shellQuote(path)}`;
-  throw new KsmPermissionError(
+  throw new KsmError(
     `KSM requires root privileges. Run hearth setup with sudo, or manually: ${hint}`,
     { cause: err },
   );
@@ -127,7 +113,7 @@ function parseKsmInt(name: string): number {
   const raw = readKsmFile(name);
   const value = parseInt(raw, 10);
   if (Number.isNaN(value)) {
-    throw new KsmParseError(`Failed to parse KSM ${name}: "${raw}"`);
+    throw new KsmError(`Failed to parse KSM ${name}: "${raw}"`);
   }
   return value;
 }

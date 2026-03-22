@@ -2,8 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
-  enableKsm, getKsmStats, tuneKsm, initKsm, VALID_KSM_FILES,
-  KsmPermissionError, KsmParseError, KsmError,
+  enableKsm, getKsmStats, tuneKsm, initKsm, VALID_KSM_FILES, KsmError,
 } from "./ksm.js";
 
 vi.mock("node:fs", () => ({
@@ -44,34 +43,34 @@ describe("enableKsm", () => {
     expect(mockWrite).not.toHaveBeenCalled();
   });
 
-  it("throws KsmPermissionError on EACCES", () => {
+  it("throws KsmError on EACCES", () => {
     stubKsmFiles({ run: "0" });
     mockWrite.mockImplementation(() => {
       throw Object.assign(new Error("EACCES"), { code: "EACCES" });
     });
-    expect(() => enableKsm()).toThrow(KsmPermissionError);
+    expect(() => enableKsm()).toThrow(KsmError);
   });
 
-  it("throws KsmPermissionError on EPERM", () => {
+  it("throws KsmError on EPERM", () => {
     stubKsmFiles({ run: "0" });
     mockWrite.mockImplementation(() => {
       throw Object.assign(new Error("EPERM"), { code: "EPERM" });
     });
-    expect(() => enableKsm()).toThrow(KsmPermissionError);
+    expect(() => enableKsm()).toThrow(KsmError);
   });
 
-  it("throws KsmPermissionError on EACCES when reading", () => {
+  it("throws KsmError on EACCES when reading", () => {
     mockRead.mockImplementation(() => {
       throw Object.assign(new Error("EACCES"), { code: "EACCES" });
     });
-    expect(() => enableKsm()).toThrow(KsmPermissionError);
+    expect(() => enableKsm()).toThrow(KsmError);
   });
 
-  it("throws KsmPermissionError on EPERM when reading", () => {
+  it("throws KsmError on EPERM when reading", () => {
     mockRead.mockImplementation(() => {
       throw Object.assign(new Error("EPERM"), { code: "EPERM" });
     });
-    expect(() => enableKsm()).toThrow(KsmPermissionError);
+    expect(() => enableKsm()).toThrow(KsmError);
   });
 });
 
@@ -122,7 +121,7 @@ describe("getKsmStats", () => {
     expect(stats.memorySaved).toBe("1.5 GB");
   });
 
-  it("throws KsmParseError on unparseable sysfs value", () => {
+  it("throws KsmError on unparseable sysfs value", () => {
     stubKsmFiles({
       run: "1",
       pages_shared: "not_a_number",
@@ -131,7 +130,7 @@ describe("getKsmStats", () => {
       full_scans: "0",
     });
 
-    expect(() => getKsmStats()).toThrow(KsmParseError);
+    expect(() => getKsmStats()).toThrow(KsmError);
     expect(() => getKsmStats()).toThrow('Failed to parse KSM pages_shared: "not_a_number"');
   });
 });

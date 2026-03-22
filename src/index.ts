@@ -8,6 +8,6 @@ export type { EnvironmentMeta } from "./environment/metadata.js";
 export type { StartResult } from "./environment/start.js";
 export type { SpawnHandle } from "./agent/client.js";
 export type { SnapshotInfo, ExecResult, ExecOptions, SpawnOptions, CreateOptions } from "./sandbox/types.js";
-export { enableKsm, getKsmStats, tuneKsm, initKsm, KsmError, KsmPermissionError, KsmParseError } from "./vm/ksm.js";
+export { enableKsm, getKsmStats, tuneKsm, initKsm, KsmError } from "./vm/ksm.js";
 export type { KsmStats, KsmTuneOptions } from "./vm/ksm.js";
 export { HearthError, VmBootError, ExecError, TimeoutError, AgentError, ResourceError, isNodeError, isPermissionError } from "./errors.js";
