@@ -18,6 +18,7 @@ import { download, fetchText } from "./download.js";
 import { getHearthDir } from "../vm/binary.js";
 import { errorMessage } from "../util.js";
 import { setupThinPool as initThinPool, canUseThinPool } from "../vm/thin.js";
+import { initKsm } from "../vm/ksm.js";
 
 const HEARTH_DIR = getHearthDir();
 const BIN_DIR = join(HEARTH_DIR, "bin");
@@ -48,6 +49,7 @@ async function main() {
   await setupRootfs();
   await createBaseSnapshot();
   await setupThinPool();
+  setupKsm();
 
   reportFilesystem();
 
@@ -312,6 +314,18 @@ async function setupThinPool() {
     console.log("  thin pool: active (instant CoW snapshots)");
   } else {
     console.log("  thin pool: setup failed (falling back to file copies)");
+  }
+}
+
+function setupKsm() {
+  try {
+    if (initKsm()) {
+      console.log("  KSM: enabled (kernel same-page merging for memory deduplication)");
+    } else {
+      console.log("  KSM: skipped (requires root — sandboxes will still work, but without memory deduplication)");
+    }
+  } catch {
+    console.log("  KSM: not available on this system");
   }
 }
 

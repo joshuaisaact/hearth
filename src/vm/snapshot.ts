@@ -20,12 +20,30 @@ export const MEMORY_NAME = "memory.snap";
 export const VSOCK_NAME = "vsock";
 export const SOCKET_NAME = "firecracker.sock";
 
-let baseSnapshotReady: Promise<void> | null = null;
+/** Default guest memory in MiB. Safe for concurrent sandboxes thanks to KSM page deduplication. */
+export const DEFAULT_MEMORY_MIB = 2048;
 
-export function ensureBaseSnapshot(): Promise<void> {
-  if (!baseSnapshotReady) {
-    baseSnapshotReady = createBaseSnapshotIfNeeded();
+const MIN_MEMORY_MIB = 128;
+const MAX_MEMORY_MIB = 32768;
+
+let baseSnapshotReady: Promise<void> | null = null;
+let baseSnapshotMemoryMib: number | null = null;
+
+export function ensureBaseSnapshot(memoryMib: number = DEFAULT_MEMORY_MIB): Promise<void> {
+  if (!Number.isInteger(memoryMib) || memoryMib < MIN_MEMORY_MIB || memoryMib > MAX_MEMORY_MIB) {
+    throw new Error(`memoryMib must be an integer between ${MIN_MEMORY_MIB} and ${MAX_MEMORY_MIB}, got ${memoryMib}`);
   }
+  if (baseSnapshotReady) {
+    if (baseSnapshotMemoryMib !== null && memoryMib !== baseSnapshotMemoryMib) {
+      console.warn(
+        `Warning: ignoring memoryMib=${memoryMib}, base snapshot already created with ${baseSnapshotMemoryMib} MiB. ` +
+        `Delete ~/.hearth/snapshots/base to recreate with a different size.`,
+      );
+    }
+    return baseSnapshotReady;
+  }
+  baseSnapshotMemoryMib = memoryMib;
+  baseSnapshotReady = createBaseSnapshotIfNeeded(memoryMib);
   return baseSnapshotReady;
 }
 
@@ -41,7 +59,7 @@ export function hasBaseSnapshot(): boolean {
   );
 }
 
-async function createBaseSnapshotIfNeeded(): Promise<void> {
+async function createBaseSnapshotIfNeeded(memoryMib: number): Promise<void> {
   if (hasBaseSnapshot()) return;
 
   mkdirSync(SNAPSHOT_DIR, { recursive: true });
@@ -83,7 +101,7 @@ async function createBaseSnapshotIfNeeded(): Promise<void> {
   try {
     // Configure VM — these are independent, run in parallel
     await Promise.all([
-      api.putMachineConfig(2, 512),
+      api.putMachineConfig(2, memoryMib),
       api.putBootSource(
         getKernelPath(),
         "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init",

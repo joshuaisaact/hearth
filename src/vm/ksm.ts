@@ -1,0 +1,153 @@
+import { readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+
+const KSM_BASE = "/sys/kernel/mm/ksm";
+const VALID_KSM_FILES = /^[a-z_]+$/;
+
+export interface KsmStats {
+  /** Number of page slots shared (deduplicated originals). */
+  pagesShared: number;
+  /** Number of pages that are sharing (pointing to a shared slot). */
+  pagesSharing: number;
+  /** Number of pages unique but repeatedly checked. */
+  pagesUnshared: number;
+  /** Number of full scans KSM has completed. */
+  fullScans: number;
+  /** Whether KSM is currently enabled. */
+  enabled: boolean;
+  /** Bytes saved via page deduplication (pagesSharing * pageSize). */
+  bytesSaved: number;
+  /** Human-readable memory savings string. */
+  memorySaved: string;
+}
+
+export interface KsmTuneOptions {
+  /** Pages to scan per sleep cycle. Default: 1000. */
+  pagesToScan?: number;
+  /** Milliseconds to sleep between scan cycles. Default: 20. */
+  sleepMs?: number;
+}
+
+function validateName(name: string): void {
+  if (!VALID_KSM_FILES.test(name)) {
+    throw new Error(`Invalid KSM parameter name: ${name}`);
+  }
+}
+
+function readKsmFile(name: string): string {
+  validateName(name);
+  return readFileSync(`${KSM_BASE}/${name}`, "utf-8").trim();
+}
+
+function writeKsmFile(name: string, value: string): void {
+  validateName(name);
+  try {
+    writeFileSync(`${KSM_BASE}/${name}`, value);
+  } catch (err) {
+    if (isPermissionError(err)) {
+      throw new Error(
+        `KSM requires root privileges. Run hearth setup with sudo, or manually: echo '${value}' | sudo tee '${KSM_BASE}/${name}'`,
+      );
+    }
+    throw err;
+  }
+}
+
+function isNodeError(err: unknown): err is NodeJS.ErrnoException {
+  return err instanceof Error && "code" in err;
+}
+
+function isPermissionError(err: unknown): boolean {
+  return isNodeError(err) && err.code === "EACCES";
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  }
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
+  }
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(0)} KB`;
+  }
+  return `${bytes} B`;
+}
+
+/**
+ * Enable KSM (Kernel Same-page Merging).
+ * Idempotent — no-op if already enabled.
+ */
+export function enableKsm(): void {
+  const current = readKsmFile("run");
+  if (current === "1") return;
+  writeKsmFile("run", "1");
+}
+
+function parseKsmInt(name: string): number {
+  const raw = readKsmFile(name);
+  const value = parseInt(raw, 10);
+  if (Number.isNaN(value)) {
+    throw new Error(`Failed to parse KSM ${name}: "${raw}"`);
+  }
+  return value;
+}
+
+/** System page size in bytes. 4096 on x86_64, may be 65536 on aarch64. */
+const PAGE_SIZE = (() => {
+  try {
+    return parseInt(execFileSync("getconf", ["PAGE_SIZE"], { stdio: "pipe" }).toString().trim(), 10) || 4096;
+  } catch {
+    return 4096;
+  }
+})();
+
+/**
+ * Read current KSM statistics.
+ */
+export function getKsmStats(): KsmStats {
+  const enabled = readKsmFile("run") === "1";
+  const pagesShared = parseKsmInt("pages_shared");
+  const pagesSharing = parseKsmInt("pages_sharing");
+  const pagesUnshared = parseKsmInt("pages_unshared");
+  const fullScans = parseKsmInt("full_scans");
+  const bytesSaved = pagesSharing * PAGE_SIZE;
+
+  return {
+    pagesShared,
+    pagesSharing,
+    pagesUnshared,
+    fullScans,
+    enabled,
+    bytesSaved,
+    memorySaved: formatBytes(bytesSaved),
+  };
+}
+
+/**
+ * Tune KSM aggressiveness.
+ * Default: pages_to_scan=1000, sleep_millisecs=20
+ * (more aggressive than kernel defaults, reasonable for a VM host).
+ */
+export function tuneKsm(opts: KsmTuneOptions = {}): void {
+  const { pagesToScan = 1000, sleepMs = 20 } = opts;
+  writeKsmFile("pages_to_scan", String(pagesToScan));
+  writeKsmFile("sleep_millisecs", String(sleepMs));
+}
+
+/**
+ * Enable and tune KSM in one call. Returns true if successful.
+ * On permission errors, logs a warning and returns false (does not throw).
+ */
+export function initKsm(): boolean {
+  try {
+    enableKsm();
+    tuneKsm();
+    return true;
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("KSM requires root")) {
+      return false;
+    }
+    throw err;
+  }
+}

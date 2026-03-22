@@ -22,3 +22,8 @@ export interface SpawnOptions extends CommandOptions {
   cols?: number;
   rows?: number;
 }
+
+export interface CreateOptions {
+  /** Guest memory in MiB. Only applies when creating a new base snapshot. Default: 2048. */
+  memoryMib?: number;
+}

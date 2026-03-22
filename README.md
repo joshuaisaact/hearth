@@ -533,6 +533,27 @@ The `claude-base` snapshot has Claude Code pre-installed but no credentials — 
 
 See [examples/claude-in-sandbox.ts](examples/claude-in-sandbox.ts) for a complete working example.
 
+## Memory efficiency
+
+Each sandbox is configured with 2 GB of guest memory by default — enough to run `pnpm install`, compile TypeScript, and handle typical AI agent workloads without OOM kills.
+
+Hearth uses **KSM (Kernel Same-page Merging)** to keep actual host memory usage low. Sandboxes restored from the same snapshot share nearly identical memory pages. KSM runs in the kernel and transparently deduplicates these pages across all Firecracker processes. In practice, the unique memory per sandbox is typically 200–500 MB, so running 10 sandboxes costs ~4 GB of host RAM instead of 20 GB.
+
+KSM is enabled automatically during `hearth setup` (requires root). No configuration needed. You can check current savings with:
+
+```bash
+hearth status
+# KSM: active — 847 MB saved (12,847 shared pages, 42 full scans)
+```
+
+To override the default memory for base snapshot creation:
+
+```typescript
+const sandbox = await Sandbox.create({ memoryMib: 4096 });
+```
+
+> **Note:** `memoryMib` only takes effect when creating a new base snapshot. If you change the default, delete the existing base snapshot (`rm -rf ~/.hearth/snapshots/base`) and re-run `hearth setup` or let the next `Sandbox.create()` rebuild it.
+
 ## Roadmap
 
 **v0.1**: Working `create → exec → destroy` loop with snapshot restore.
