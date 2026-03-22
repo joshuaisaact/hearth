@@ -76,6 +76,7 @@ const simple_syscalls = [_]u32{
     // Core I/O
     0,   // read
     1,   // write
+    2,   // open (Zig's linux.open() emits raw open syscall)
     3,   // close
     8,   // lseek
     16,  // ioctl (KVM, FIONBIO, TUNSETIFF)
@@ -83,8 +84,10 @@ const simple_syscalls = [_]u32{
     18,  // pwrite64 (virtio-blk)
     19,  // readv (virtio-net TAP)
     20,  // writev (virtio-net TAP)
+    48,  // shutdown (vsock partial close)
     72,  // fcntl (O_NONBLOCK)
-    74,  // fsync (disk flush)
+    74,  // fsync
+    75,  // fdatasync (virtio-blk T_FLUSH)
     87,  // unlink (API socket cleanup)
     257, // openat
 

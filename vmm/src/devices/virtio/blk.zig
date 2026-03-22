@@ -133,7 +133,7 @@ pub fn processRequest(self: Self, mem: *Memory, queue: *Queue, head: u16) !void 
             if (status == S_OK and !self.validateSectorRange(sector, total_data_len)) {
                 log.err("read past end of disk: sector={} len={}", .{ sector, total_data_len });
                 status = S_IOERR;
-            } else {
+            } else if (status == S_OK) {
                 // Read from disk into guest buffers
                 // sector is validated by validateSectorRange — multiplication is safe
                 var file_offset: u64 = sector * SECTOR_SIZE;
@@ -170,7 +170,7 @@ pub fn processRequest(self: Self, mem: *Memory, queue: *Queue, head: u16) !void 
             if (status == S_OK and !self.validateSectorRange(sector, total_data_len)) {
                 log.err("write past end of disk: sector={} len={}", .{ sector, total_data_len });
                 status = S_IOERR;
-            } else {
+            } else if (status == S_OK) {
                 // Write from guest buffers to disk
                 // sector is validated by validateSectorRange — multiplication is safe
                 var file_offset: u64 = sector * SECTOR_SIZE;

@@ -303,3 +303,66 @@ test "snapshot: header version validation" {
     try std.testing.expectError(error.InvalidSnapshot, snapshot.readHeader(buf));
 }
 
+test "snapshot: header rejects oversized mem_size" {
+    var buf: [snapshot.HEADER_SIZE]u8 = undefined;
+    // 16384 MiB = max allowed
+    snapshot.writeHeader(&buf, 16384 * 1024 * 1024, 0);
+    const ok = try snapshot.readHeader(buf);
+    try std.testing.expectEqual(@as(u64, 16384 * 1024 * 1024), ok.mem_size);
+
+    // 16385 MiB = over limit
+    snapshot.writeHeader(&buf, 16385 * 1024 * 1024, 0);
+    try std.testing.expectError(error.InvalidSnapshot, snapshot.readHeader(buf));
+}
+
+// -- API path validation tests --
+
+const api_mod = @import("api.zig");
+
+test "api: isValidBasename accepts simple filenames" {
+    try std.testing.expect(api_mod.isValidBasename("vmstate.snap"));
+    try std.testing.expect(api_mod.isValidBasename("memory.snap"));
+    try std.testing.expect(api_mod.isValidBasename("a"));
+}
+
+test "api: isValidBasename rejects path traversal" {
+    try std.testing.expect(!api_mod.isValidBasename(""));
+    try std.testing.expect(!api_mod.isValidBasename("/etc/passwd"));
+    try std.testing.expect(!api_mod.isValidBasename("../../../etc/shadow"));
+    try std.testing.expect(!api_mod.isValidBasename("foo/bar"));
+    try std.testing.expect(!api_mod.isValidBasename(".."));
+    try std.testing.expect(!api_mod.isValidBasename("foo..bar")); // contains ".."
+}
+
+// -- Seccomp syscall coverage test --
+
+test "seccomp: all required syscalls are whitelisted" {
+    const filter = &seccomp_mod.kill_filter;
+    // The filter allows simple_syscalls + 3 argument-filtered syscalls (clone, socket, mprotect).
+    // Verify key syscalls are present by checking the filter jumps to ALLOW.
+    // Each simple syscall is a JEQ instruction that jumps to ALLOW on match.
+    var found_fdatasync = false;
+    var found_open = false;
+    var found_shutdown = false;
+    var found_epoll_create1 = false;
+    var found_nanosleep = false;
+    var found_statx = false;
+    for (filter) |insn| {
+        // JEQ instructions have code 0x15 (BPF_JMP|BPF_JEQ|BPF_K)
+        if (insn.code == 0x15) {
+            if (insn.k == 75) found_fdatasync = true;
+            if (insn.k == 2) found_open = true;
+            if (insn.k == 48) found_shutdown = true;
+            if (insn.k == 291) found_epoll_create1 = true;
+            if (insn.k == 35) found_nanosleep = true;
+            if (insn.k == 332) found_statx = true;
+        }
+    }
+    try std.testing.expect(found_fdatasync);
+    try std.testing.expect(found_open);
+    try std.testing.expect(found_shutdown);
+    try std.testing.expect(found_epoll_create1);
+    try std.testing.expect(found_nanosleep);
+    try std.testing.expect(found_statx);
+}
+

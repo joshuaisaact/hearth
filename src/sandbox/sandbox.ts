@@ -321,7 +321,8 @@ export class Sandbox {
     this.agent.close();
     this.agent = new AgentClient(this.vsockPath);
     await this.agent.waitForConnection(timeoutMs);
-    await this.agent.ping();
+    const ok = await this.agent.ping();
+    if (!ok) throw new Error("Agent ping failed after reconnect");
   }
 
   /**

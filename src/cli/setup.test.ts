@@ -13,7 +13,9 @@ describe("hearth setup", () => {
   });
 
   it("should have installed the kernel", () => {
-    expect(existsSync(join(HEARTH_DIR, "bases", "vmlinux"))).toBe(true);
+    const hasBzImage = existsSync(join(HEARTH_DIR, "bases", "bzImage"));
+    const hasVmlinux = existsSync(join(HEARTH_DIR, "bases", "vmlinux"));
+    expect(hasBzImage || hasVmlinux).toBe(true);
   });
 
   it("should have built the rootfs", () => {

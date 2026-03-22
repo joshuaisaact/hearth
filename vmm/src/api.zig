@@ -412,6 +412,12 @@ fn handleSnapshotLoad(request: *http.Server.Request, body: ?[]const u8, allocato
     };
     defer parsed.deinit();
 
+    // Reject paths with directory traversal or absolute paths
+    if (!isValidBasename(parsed.value.snapshot_path) or !isValidBasename(parsed.value.mem_file_path)) {
+        respondError(request, .bad_request, "paths must be relative basenames (no / or ..)");
+        return .ok;
+    }
+
     // Allocate both paths before assigning to config to avoid partial state on failure
     const sp = allocator.dupeZ(u8, parsed.value.snapshot_path) catch {
         respondError(request, .internal_server_error, "allocation failed");
@@ -444,7 +450,7 @@ fn readBody(request: *http.Server.Request, buf: []u8) !?[]const u8 {
 }
 
 /// Validate that a path is a simple basename (no directory separators or traversal).
-fn isValidBasename(path: []const u8) bool {
+pub fn isValidBasename(path: []const u8) bool {
     if (path.len == 0) return false;
     if (path[0] == '/') return false;
     if (std.mem.indexOf(u8, path, "..") != null) return false;
@@ -595,17 +601,15 @@ fn handleVmPatch(
     defer parsed.deinit();
 
     if (std.mem.eql(u8, parsed.value.state, "Paused")) {
-        // Poke the vCPU first so KVM_RUN returns -EINTR.
-        // Must happen before the release-store on paused so the
-        // run loop's acquire-load sees both writes.
-        runtime.vcpu.kvm_run.immediate_exit = 1;
-
         // Atomically transition false→true; rejects concurrent pause requests
         if (runtime.paused.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
-            runtime.vcpu.kvm_run.immediate_exit = 0;
             respondError(request, .bad_request, "VM is already paused");
             return;
         }
+
+        // Set immediate_exit AFTER winning the cmpxchg to avoid racing with
+        // a concurrent pause request that could clear it.
+        runtime.vcpu.kvm_run.immediate_exit = 1;
 
         // Kick the vCPU thread out of a blocking KVM_RUN (e.g., guest in HLT).
         // immediate_exit only takes effect on the *next* KVM_RUN call, so if
@@ -763,15 +767,6 @@ fn handlePostBootAction(
         runtime.exited.store(true, .release);
         // Kick the vCPU thread out of KVM_RUN so it sees the exited flag
         runtime.kickVcpu();
-
-        // Wait briefly for the run loop to actually finish
-        const linux = std.os.linux;
-        var waited: u32 = 0;
-        while (waited < 20) : (waited += 1) {
-            if (runtime.exited.load(.acquire)) break;
-            const ts = linux.timespec{ .sec = 0, .nsec = 100_000_000 }; // 100ms
-            _ = linux.nanosleep(&ts, null);
-        }
         respondOk(request);
     } else {
         respondError(request, .bad_request, "unknown action_type (post-boot supports: SendCtrlAltDel)");

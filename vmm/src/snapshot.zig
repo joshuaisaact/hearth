@@ -141,8 +141,10 @@ pub fn save(
     clock.flags &= ~@as(u32, 2); // KVM_CLOCK_TSC_STABLE = 2
     try writeAll(state_fd, std.mem.asBytes(&clock));
 
-    // Device state
+    // Device state — all slots 0..device_count must be non-null.
+    // The header encodes device_count and restore reads exactly that many blobs.
     for (devices[0..device_count]) |*dev_opt| {
+        std.debug.assert(dev_opt.* != null);
         if (dev_opt.*) |*dev| {
             var dev_buf: [DEVICE_BUF_SIZE]u8 = undefined;
             const dev_len = dev.snapshotSave(&dev_buf);
@@ -333,7 +335,7 @@ fn openCreate(path: [*:0]const u8) !i32 {
         .CREAT = true,
         .TRUNC = true,
         .CLOEXEC = true,
-    }, 0o644));
+    }, 0o600)); // 0600: snapshots may contain guest secrets
     if (rc < 0) return error.SnapshotOpenFailed;
     return @intCast(rc);
 }
