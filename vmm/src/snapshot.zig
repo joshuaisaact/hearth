@@ -182,7 +182,7 @@ pub fn load(
     // --- Restore guest memory via demand-paged mmap ---
     // Register with KVM immediately — Firecracker sets memory BEFORE vCPU state
     // because LAPIC/MSR state restoration may reference guest memory addresses.
-    const mem = try Memory.initFromFile(mem_path, header.mem_size);
+    var mem = try Memory.initFromFile(mem_path, header.mem_size);
     errdefer mem.deinit();
     try vm.setMemoryRegion(0, 0, mem.alignedMem());
 
@@ -246,7 +246,8 @@ pub fn load(
 
     var pit: c.kvm_pit_state2 = undefined;
     try readExact(state_fd, std.mem.asBytes(&pit));
-    pit.flags |= c.KVM_PIT_SPEAKER_DUMMY;
+    // Do NOT modify pit.flags — KVM_PIT_SPEAKER_DUMMY (0x1) has the same
+    // value as KVM_PIT_FLAGS_HPET_LEGACY, which disables the PIT timer entirely.
 
     var clock: c.kvm_clock_data = undefined;
     try readExact(state_fd, std.mem.asBytes(&clock));
@@ -295,6 +296,8 @@ pub fn load(
     var serial_data: [Serial.SNAPSHOT_SIZE]u8 = undefined;
     try readExact(state_fd, &serial_data);
     serial.snapshotRestore(serial_data);
+
+    log.info("restore complete (pit.flags={})", .{pit.flags});
 
     log.info("snapshot loaded: {} MB memory (demand-paged), {} devices", .{
         header.mem_size / (1024 * 1024),

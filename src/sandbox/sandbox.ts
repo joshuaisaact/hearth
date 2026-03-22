@@ -9,7 +9,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
 import { FlintApi } from "../vm/api.js";
 import { AgentClient } from "../agent/client.js";
-import { getVmmPath, getHearthDir } from "../vm/binary.js";
+import { getVmmPath, getKernelPath, getRootfsPath, getHearthDir } from "../vm/binary.js";
 import {
   ensureBaseSnapshot,
   getSnapshotDir,
@@ -18,6 +18,7 @@ import {
   MEMORY_NAME,
   VSOCK_NAME,
   SOCKET_NAME,
+  DEFAULT_MEMORY_MIB,
 } from "../vm/snapshot.js";
 import { startProxy, PROXY_URL, PROXY_GUEST_PORT } from "../network/proxy.js";
 import { VmBootError, TimeoutError } from "../errors.js";
@@ -70,11 +71,82 @@ export class Sandbox {
     activeSandboxes.add(this);
   }
 
-  /** Create a sandbox from the base snapshot. */
+  /** Create a sandbox by booting a fresh VM. */
   static async create(opts?: CreateOptions): Promise<Sandbox> {
     initKsm(); // best-effort, idempotent, never throws
-    await ensureBaseSnapshot(opts?.memoryMib);
-    return Sandbox.restoreFromDir(getSnapshotDir());
+    return Sandbox.freshBoot(opts?.memoryMib ?? DEFAULT_MEMORY_MIB);
+  }
+
+  /** Boot a fresh VM from the rootfs (no snapshot restore). */
+  private static async freshBoot(memoryMib: number): Promise<Sandbox> {
+    const id = randomBytes(8).toString("hex");
+    const runDir = join(getHearthDir(), "run", id);
+    mkdirSync(runDir, { recursive: true });
+
+    // Copy rootfs (reflink on btrfs/XFS)
+    const clone = constants.COPYFILE_FICLONE;
+    await copyFile(getRootfsPath(), join(runDir, ROOTFS_NAME), clone);
+
+    const vsockPath = join(runDir, VSOCK_NAME);
+    const agent = new AgentClient(vsockPath);
+    const agentConnected = agent.waitForConnection(15000);
+
+    // Wait for vsock listener to be ready
+    await waitForFile(`${vsockPath}_1024`, 2000);
+
+    const proc = spawn(
+      getVmmPath(),
+      ["--api-sock", SOCKET_NAME],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+        cwd: runDir,
+        detached: false,
+      },
+    );
+
+    let stderrBuf = "";
+    proc.stderr?.on("data", (chunk: Buffer) => {
+      if (stderrBuf.length < 2000) stderrBuf += chunk.toString();
+    });
+
+    const cleanup = () => {
+      try { proc.kill("SIGKILL"); } catch {}
+      rmSync(runDir, { recursive: true, force: true });
+    };
+
+    try {
+      await waitForFile(join(runDir, SOCKET_NAME), 5000);
+    } catch {
+      cleanup();
+      throw new VmBootError(`Flint failed to start. stderr: ${stderrBuf.slice(0, 500)}`);
+    }
+
+    const api = new FlintApi(join(runDir, SOCKET_NAME));
+
+    try {
+      await api.putMachineConfig(1, memoryMib);
+      await api.putBootSource(
+        getKernelPath(),
+        "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init root=/dev/vda rw",
+      );
+      await api.putDrive("rootfs", ROOTFS_NAME, true, false);
+      await api.putVsock(100, join(runDir, VSOCK_NAME));
+      await api.start();
+    } catch (err) {
+      cleanup();
+      throw new VmBootError(`Failed to boot VM: ${errorMessage(err)}`);
+    }
+
+    try {
+      await agentConnected;
+    } catch (err) {
+      cleanup();
+      throw new VmBootError(`Agent failed to connect: ${errorMessage(err)}. stderr: ${stderrBuf.slice(0, 500)}`);
+    }
+
+    await agent.ping();
+
+    return new Sandbox(proc, api, agent, runDir, id, vsockPath);
   }
 
   /** Create a sandbox from a named user snapshot. */

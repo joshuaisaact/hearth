@@ -479,7 +479,7 @@ fn restoreVm(
     defer vm.deinit();
 
     try vm.setTssAddr(0xFFFBD000);
-    try vm.setIdentityMapAddr(0xFFFBC000);
+    // Note: no KVM_SET_IDENTITY_MAP_ADDR — Firecracker doesn't call it
 
     // irqchip and PIT must exist before snapshot.load() overwrites their state
     try vm.createIrqChip();
@@ -542,7 +542,7 @@ fn restoreVmWithApi(
     defer vm.deinit();
 
     try vm.setTssAddr(0xFFFBD000);
-    try vm.setIdentityMapAddr(0xFFFBC000);
+    // Note: no KVM_SET_IDENTITY_MAP_ADDR — Firecracker doesn't call it
     try vm.createIrqChip();
     try vm.createPit2();
 
@@ -807,6 +807,7 @@ fn runLoopThread(runtime: *VmRuntime) void {
     const tid: i32 = @intCast(std.os.linux.gettid());
     runtime.vcpu_tid.store(tid, .release);
 
+
     runLoop(
         runtime.vcpu,
         runtime.serial,
@@ -877,7 +878,7 @@ fn runLoop(vcpu: *Vcpu, serial: *Serial, vm: *const Vm, mem: *Memory, devices: *
             return err;
         };
         exit_count +%= 1;
-
+        if (exit_count <= 5) log.info("exit #{}: reason={}", .{ exit_count, exit_reason });
 
         // Flush pending vsock write buffers
         for (devices[0..device_count]) |*dev_opt| {

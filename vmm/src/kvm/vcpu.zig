@@ -161,7 +161,7 @@ pub fn setXcrs(self: Self, xcrs: *const c.kvm_xcrs) !void {
 
 /// MSR buffer layout matches kvm_msrs: nmsrs:u32 + pad:u32 + entries[].
 /// KVM limits the number of MSRs per ioctl call so we use a fixed buffer.
-pub const MAX_MSR_ENTRIES = 32;
+pub const MAX_MSR_ENTRIES = 96;
 pub const MsrBuffer = extern struct {
     nmsrs: u32,
     pad: u32 = 0,
@@ -182,17 +182,20 @@ pub const snapshot_msr_indices = [_]u32{
     0x1A0, // MSR_IA32_MISC_ENABLE
     0x277, // MSR_IA32_CR_PAT
     0x6E0, // MSR_IA32_TSC_DEADLINE — must be after TSC
-    // KVM paravirt clock — critical for guest timekeeping after restore
+    // KVM paravirt clock
     0x4b564d00, // MSR_KVM_WALL_CLOCK_NEW
     0x4b564d01, // MSR_KVM_SYSTEM_TIME_NEW
     0x4b564d02, // MSR_KVM_ASYNC_PF_EN
     0x4b564d03, // MSR_KVM_STEAL_TIME
     0x4b564d04, // MSR_KVM_PV_EOI_EN
-    // Syscall entry points
+    // Syscall / segment bases
+    0xC0000080, // MSR_IA32_EFER
     0xC0000081, // MSR_STAR
     0xC0000082, // MSR_LSTAR
     0xC0000083, // MSR_CSTAR
     0xC0000084, // MSR_SYSCALL_MASK
+    0xC0000100, // MSR_FS_BASE
+    0xC0000101, // MSR_GS_BASE
     0xC0000102, // MSR_KERNEL_GS_BASE
 };
 
@@ -203,11 +206,25 @@ pub fn getMsrs(self: Self, buf: *MsrBuffer) !void {
     for (snapshot_msr_indices, 0..) |idx, i| {
         buf.entries[i] = .{ .index = idx, .reserved = 0, .data = 0 };
     }
-    try abi.ioctlVoid(self.fd, c.KVM_GET_MSRS, @intFromPtr(buf));
+    // KVM_GET_MSRS returns the number actually read via the ioctl return value.
+    // Some MSRs may not be accessible; nmsrs is updated to the count read.
+    const rc = abi.ioctl(self.fd, c.KVM_GET_MSRS, @intFromPtr(buf));
+    const read_count: u32 = @intCast(rc catch return error.VmRunFailed);
+    if (read_count != snapshot_msr_indices.len) {
+        log.warn("KVM_GET_MSRS: requested {} got {} (some MSRs not accessible)", .{ snapshot_msr_indices.len, read_count });
+        buf.nmsrs = read_count;
+    }
 }
 
 pub fn setMsrs(self: Self, buf: *const MsrBuffer) !void {
-    try abi.ioctlVoid(self.fd, c.KVM_SET_MSRS, @intFromPtr(buf));
+    const rc = abi.ioctl(self.fd, c.KVM_SET_MSRS, @intFromPtr(buf)) catch return error.VmRunFailed;
+    const set_count: u32 = @intCast(rc);
+    if (set_count != buf.nmsrs) {
+        log.warn("KVM_SET_MSRS: requested {} set {} (MSR 0x{x} failed)", .{
+            buf.nmsrs, set_count,
+            if (set_count < buf.nmsrs) buf.entries[set_count].index else 0,
+        });
+    }
 }
 
 /// Notify KVM that the guest was paused (prevents soft lockup watchdog
