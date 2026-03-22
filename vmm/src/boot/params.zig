@@ -64,7 +64,16 @@ pub const OFF_RAMDISK_SIZE = 0x21C;
 pub const OFF_HEAP_END_PTR = 0x224;
 pub const OFF_CMD_LINE_PTR = 0x228;
 pub const OFF_INITRD_ADDR_MAX = 0x22C;
+pub const OFF_BOOT_FLAG = 0x1FE;
+pub const OFF_HEADER = 0x202;
+pub const OFF_VERSION = 0x206;
+pub const OFF_CODE32_START = 0x214;
+pub const OFF_KERNEL_ALIGNMENT = 0x230;
+pub const OFF_RELOCATABLE = 0x234;
+pub const OFF_MIN_ALIGNMENT = 0x235;
 pub const OFF_XLOADFLAGS = 0x236;
+pub const OFF_CMDLINE_SIZE = 0x238;
+pub const OFF_INIT_SIZE = 0x260;
 pub const OFF_E820_TABLE = 0x2D0; // e820 table (array of E820Entry, max 128)
 
 // Well-known guest physical addresses for the Linux boot protocol

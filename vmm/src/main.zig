@@ -718,6 +718,20 @@ fn setupRegisters(vcpu: *Vcpu, boot: loader.LoadResult, mem: *Memory) !void {
 
     try vcpu.setRegs(&regs);
 
+    // Set initial MSRs — the kernel expects certain MSRs to have valid values.
+    // Without these, the kernel may hang during early boot (e.g., perf_event_init
+    // reads IA32_MISC_ENABLE, APIC setup reads IA32_APICBASE).
+    var msr_buf: Vcpu.MsrBuffer = undefined;
+    msr_buf.nmsrs = 3;
+    msr_buf.pad = 0;
+    // IA32_MISC_ENABLE: enable fast string operations (bit 0)
+    msr_buf.entries[0] = .{ .index = 0x1A0, .reserved = 0, .data = 1 };
+    // IA32_APICBASE: set LAPIC at default address, enabled, BSP
+    msr_buf.entries[1] = .{ .index = 0x1B, .reserved = 0, .data = 0xFEE00900 };
+    // IA32_TSC: initialize TSC to 0
+    msr_buf.entries[2] = .{ .index = 0x10, .reserved = 0, .data = 0 };
+    try vcpu.setMsrs(&msr_buf);
+
     log.info("registers configured: rip=0x{x} (startup_64) rsi=0x{x}", .{ regs.rip, regs.rsi });
 }
 
@@ -925,6 +939,12 @@ fn runLoop(vcpu: *Vcpu, serial: *Serial, vm: *const Vm, mem: *Memory, devices: *
                     if (serial.hasPendingIrq()) {
                         injectIrq(vm, Serial.IRQ);
                     }
+                } else if (io.direction == c.KVM_EXIT_IO_IN) {
+                    // Return 0xFF for unhandled IN ports (= no device present).
+                    // Without this, the kernel's 8250 serial driver detects phantom
+                    // UARTs at COM2/COM3/COM4 and spins trying to initialize them.
+                    const total = @as(u32, io.count) * io.size;
+                    @memset(io.data[0..total], 0xFF);
                 }
             },
             c.KVM_EXIT_MMIO => {

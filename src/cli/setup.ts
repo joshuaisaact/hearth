@@ -118,13 +118,15 @@ async function setupKernel() {
   const architecture = fcArch();
 
   // Download vmlinux from Firecracker CI S3 bucket (ELF format with virtio built-in).
-  // Flint supports both ELF vmlinux and bzImage formats.
+  // We use the 5.10.x kernel because it has CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y,
+  // which Flint needs for virtio device discovery via kernel cmdline parameters.
+  // The 6.1.x kernel dropped this config option and requires device tree / ACPI.
   console.log("  kernel: finding latest from Firecracker CI...");
   const { fetchText } = await import("./download.js");
-  const listUrl = `http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/v1.15/${architecture}/vmlinux-&list-type=2`;
+  const listUrl = `http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/v1.15/${architecture}/vmlinux-5.10&list-type=2`;
   const xml = await fetchText(listUrl);
 
-  const keys = [...xml.matchAll(/<Key>(firecracker-ci\/[^<]+\/vmlinux-[\d.]+)<\/Key>/g)]
+  const keys = [...xml.matchAll(/<Key>(firecracker-ci\/[^<]+\/vmlinux-5\.10[\d.]+)<\/Key>/g)]
     .map((m) => m[1])
     .sort();
 

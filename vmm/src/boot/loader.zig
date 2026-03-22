@@ -289,25 +289,32 @@ fn loadElfKernel(mem: *Memory, kernel_data: []const u8, initrd_path: ?[*:0]const
         term[0] = 0;
     }
 
-    // Set up boot_params (zero page)
+    // Set up boot_params (zero page) — must match what Firecracker/QEMU set
+    // for vmlinux ELF kernels. The kernel reads many fields from this struct.
     const bp = try mem.slice(params.BOOT_PARAMS_ADDR, params.BOOT_PARAMS_SIZE);
     @memset(bp, 0);
 
-    // Minimal setup header for ELF boot
+    // Setup header fields (offsets relative to boot_params start)
+    std.mem.writeInt(u16, bp[params.OFF_BOOT_FLAG..][0..2], 0xAA55, .little);
+    std.mem.writeInt(u32, bp[params.OFF_HEADER..][0..4], params.HDRS_MAGIC, .little);
+    std.mem.writeInt(u16, bp[params.OFF_VERSION..][0..2], 0x020F, .little); // protocol 2.15
     bp[params.OFF_TYPE_OF_LOADER] = 0xFF;
     bp[params.OFF_LOADFLAGS] = params.LOADED_HIGH | params.CAN_USE_HEAP;
+    std.mem.writeInt(u32, bp[params.OFF_CODE32_START..][0..4], @intCast(entry_phys), .little);
     std.mem.writeInt(u16, bp[params.OFF_HEAP_END_PTR..][0..2], 0xFE00, .little);
     std.mem.writeInt(u32, bp[params.OFF_CMD_LINE_PTR..][0..4], params.CMDLINE_ADDR, .little);
-
-    // Write setup header magic so the kernel recognizes valid boot_params
-    std.mem.writeInt(u32, bp[params.OFF_SETUP_HEADER + 6 ..][0..4], params.HDRS_MAGIC, .little);
-    // Boot protocol version 2.15
-    std.mem.writeInt(u16, bp[params.OFF_SETUP_HEADER + 10 ..][0..2], 0x020F, .little);
+    std.mem.writeInt(u32, bp[params.OFF_CMDLINE_SIZE..][0..4], @intCast(cmdline.len), .little);
+    std.mem.writeInt(u32, bp[params.OFF_KERNEL_ALIGNMENT..][0..4], 0x01000000, .little); // 16MB
+    bp[params.OFF_RELOCATABLE] = 1;
+    bp[params.OFF_MIN_ALIGNMENT] = 0x15; // 2^21 = 2MB
+    std.mem.writeInt(u16, bp[params.OFF_XLOADFLAGS..][0..2], params.XLF_KERNEL_64 | 0x02 | 0x08, .little); // 64-bit + can_be_loaded_above_4g + handover_64
+    // init_size: total memory the kernel needs (from load addr to end of BSS)
+    const init_size = kernel_end - @min(entry_phys, kernel_end);
+    std.mem.writeInt(u32, bp[params.OFF_INIT_SIZE..][0..4], @intCast(init_size), .little);
 
     // Load initrd if provided
     if (initrd_path) |path| {
-        const kernel_size = kernel_end - params.KERNEL_ADDR;
-        try loadInitrd(bp, mem, path, @intCast(kernel_size));
+        try loadInitrd(bp, mem, path, @intCast(init_size));
     }
 
     // Set up e820 memory map

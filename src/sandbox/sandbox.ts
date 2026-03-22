@@ -128,6 +128,11 @@ export class Sandbox {
     // disconnect and reconnect, so 15s gives plenty of headroom.
     const agentConnected = agent.waitForConnection(15000);
 
+    // Ensure the vsock listener socket exists before spawning the VMM.
+    // server.listen() is async — the socket file may not exist immediately.
+    // CLI restore boots the VM instantly, so the listener must be ready.
+    await waitForFile(`${vsockPath}_1024`, 2000);
+
     // Use Flint CLI restore mode — boots directly into post-boot API mode,
     // no HTTP roundtrips needed for snapshot loading
     const proc = spawn(

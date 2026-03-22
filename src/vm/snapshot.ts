@@ -68,6 +68,11 @@ async function createBaseSnapshotIfNeeded(memoryMib: number): Promise<void> {
   const agent = new AgentClient(join(SNAPSHOT_DIR, VSOCK_NAME));
   const agentConnected = agent.waitForConnection(15000);
 
+  // Ensure the vsock listener socket exists before spawning the VMM.
+  // server.listen() in AgentClient is async — the socket file may not
+  // exist immediately after waitForConnection() returns the Promise.
+  await waitForFile(join(SNAPSHOT_DIR, `${VSOCK_NAME}_1024`), 2000);
+
   const proc = spawn(
     getVmmPath(),
     ["--api-sock", SOCKET_NAME],
@@ -100,16 +105,14 @@ async function createBaseSnapshotIfNeeded(memoryMib: number): Promise<void> {
   const api = new FlintApi(join(SNAPSHOT_DIR, SOCKET_NAME));
 
   try {
-    // Configure VM — these are independent, run in parallel
-    await Promise.all([
-      api.putMachineConfig(1, memoryMib),
-      api.putBootSource(
-        getKernelPath(),
-        "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init",
-      ),
-      api.putDrive("rootfs", ROOTFS_NAME, true, false),
-      api.putVsock(100, VSOCK_NAME),
-    ]);
+    // Configure VM
+    await api.putMachineConfig(1, memoryMib);
+    await api.putBootSource(
+      getKernelPath(),
+      "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init root=/dev/vda rw",
+    );
+    await api.putDrive("rootfs", ROOTFS_NAME, true, false);
+    await api.putVsock(100, join(SNAPSHOT_DIR, VSOCK_NAME));
     await api.start();
   } catch (err) {
     cleanup();
