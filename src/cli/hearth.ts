@@ -1,146 +1,98 @@
 #!/usr/bin/env node
 
+interface Command {
+  description: string;
+  run: (args: string[]) => void | Promise<void>;
+}
+
+const commands: Record<string, Command> = {
+  setup: {
+    description: "Download and configure all dependencies",
+    run: async () => { await import("./setup.js"); },
+  },
+  build: {
+    description: "Build an environment from a Hearthfile.toml",
+    run: async (args) => {
+      const { buildCommand } = await import("./build.js");
+      await buildCommand(args);
+    },
+  },
+  rebuild: {
+    description: "Rebuild an existing environment from scratch",
+    run: async (args) => {
+      const { rebuildCommand } = await import("./build.js");
+      await rebuildCommand(args);
+    },
+  },
+  envs: {
+    description: "List, inspect, or remove environments",
+    run: async (args) => {
+      const { envsCommand } = await import("./envs.js");
+      envsCommand(args);
+    },
+  },
+  claude: {
+    description: "Launch Claude Code in an isolated sandbox",
+    run: async (args) => {
+      const { claudeCommand } = await import("./claude.js");
+      await claudeCommand(args);
+    },
+  },
+  shell: {
+    description: "Start an interactive shell in a sandbox",
+    run: async (args) => {
+      const { shellCommand } = await import("./shell.js");
+      await shellCommand(args);
+    },
+  },
+  checkpoint: {
+    description: "Save a running sandbox's state (restore with 'hearth claude <name>')",
+    run: async (args) => {
+      const { checkpointCommand } = await import("./checkpoint.js");
+      await checkpointCommand(args);
+    },
+  },
+  status: {
+    description: "Show KSM memory deduplication and thin pool status",
+    run: async () => {
+      const { statusCommand } = await import("./status.js");
+      statusCommand();
+    },
+  },
+  daemon: {
+    description: "Start the Hearth daemon (for multi-process/remote access)",
+    run: async (args) => {
+      const { daemonCommand } = await import("./daemon.js");
+      daemonCommand(args);
+    },
+  },
+  connect: {
+    description: "Configure remote daemon connection (hearth connect <host>)",
+    run: async (args) => {
+      const { connectCommand } = await import("./connect.js");
+      connectCommand(args);
+    },
+  },
+  pool: {
+    description: "Manage dm-thin snapshot pool (status, destroy)",
+    run: async (args) => {
+      const { poolCommand } = await import("./pool.js");
+      poolCommand(args);
+    },
+  },
+};
+
 const command = process.argv[2];
+const args = process.argv.slice(3);
 
-if (command === "setup") {
-  await import("./setup.js");
-} else if (command === "daemon") {
-  const flags = process.argv.slice(3);
-  const isRemote = flags.includes("--remote");
-
-  if (isRemote) {
-    const { loadConfig, saveConfig, generateToken } = await import("../daemon/config.js");
-    const config = loadConfig();
-
-    if (!config.token) {
-      config.token = generateToken();
-      if (!config.port) config.port = 9100;
-      saveConfig(config);
-    }
-
-    const port = config.port ?? 9100;
-    const { startDaemon, DAEMON_SOCK } = await import("../daemon/server.js");
-    const server = startDaemon({ wsPort: port, wsToken: config.token });
-
-    console.log(`hearth daemon listening on ${DAEMON_SOCK}`);
-    console.log(`WebSocket listening on ws://0.0.0.0:${port}`);
-    console.log(`Token: ${config.token}`);
-    console.log();
-    console.log("On remote machine, create ~/.hearthrc:");
-    console.log(`  { "host": "<this-machine-ip>", "port": ${port}, "token": "${config.token}" }`);
-
-    process.on("SIGINT", () => { server.close(); process.exit(0); });
-    process.on("SIGTERM", () => { server.close(); process.exit(0); });
-  } else {
-    const { startDaemon, DAEMON_SOCK } = await import("../daemon/server.js");
-    const server = startDaemon();
-    console.log(`hearth daemon listening on ${DAEMON_SOCK}`);
-    process.on("SIGINT", () => { server.close(); process.exit(0); });
-    process.on("SIGTERM", () => { server.close(); process.exit(0); });
-  }
-} else if (command === "connect") {
-  const host = process.argv[3];
-  if (!host) {
-    console.error("Usage: hearth connect <host> [--port <port>] [--token <token>]");
-    process.exit(1);
-  }
-
-  const flags = process.argv.slice(4);
-  const portIdx = flags.indexOf("--port");
-  const tokenIdx = flags.indexOf("--token");
-  const port = portIdx !== -1 ? parseInt(flags[portIdx + 1], 10) : 9100;
-  const token = tokenIdx !== -1 ? flags[tokenIdx + 1] : undefined;
-
-  const { loadConfig, saveConfig } = await import("../daemon/config.js");
-  const config = loadConfig();
-  config.host = host;
-  config.port = port;
-  if (token) config.token = token;
-  saveConfig(config);
-
-  console.log(`Saved connection: ws://${host}:${port}`);
-  if (!token && !config.token) {
-    console.log("Note: no token set. Use --token <token> or edit ~/.hearthrc");
-  }
-} else if (command === "build") {
-  const { buildCommand } = await import("./build.js");
-  await buildCommand(process.argv.slice(3));
-} else if (command === "rebuild") {
-  const { rebuildCommand } = await import("./build.js");
-  await rebuildCommand(process.argv.slice(3));
-} else if (command === "envs") {
-  const { envsCommand } = await import("./envs.js");
-  envsCommand(process.argv.slice(3));
-} else if (command === "claude") {
-  const { claudeCommand } = await import("./claude.js");
-  await claudeCommand(process.argv.slice(3));
-} else if (command === "shell") {
-  const { shellCommand } = await import("./shell.js");
-  await shellCommand(process.argv.slice(3));
-} else if (command === "checkpoint") {
-  const { checkpointCommand } = await import("./checkpoint.js");
-  await checkpointCommand(process.argv.slice(3));
-} else if (command === "status") {
-  const { getKsmStats } = await import("../vm/ksm.js");
-  const { getThinPoolStatus } = await import("../vm/thin.js");
-
-  try {
-    const ksm = getKsmStats();
-    if (ksm.enabled) {
-      const sharedPages = ksm.pagesSharing.toLocaleString();
-      console.log(`KSM: active — ${ksm.memorySaved} saved (${sharedPages} shared pages, ${ksm.fullScans} full scans)`);
-    } else {
-      console.log("KSM: inactive — enable with: echo 1 | sudo tee /sys/kernel/mm/ksm/run");
-    }
-  } catch {
-    console.log("KSM: not available");
-  }
-
-  console.log("");
-  const pool = getThinPoolStatus();
-  if (pool) {
-    console.log(`Thin pool: active (${pool.usedDataPercent}% data, ${pool.thinCount} volumes)`);
-  } else {
-    console.log("Thin pool: not active");
-  }
-} else if (command === "pool") {
-  const sub = process.argv[3];
-  const { isThinPoolAvailable, getThinPoolStatus, destroyThinPool } = await import("../vm/thin.js");
-  if (sub === "status") {
-    const status = getThinPoolStatus();
-    if (!status) {
-      console.log("Thin pool: not active");
-      console.log("  Run hearth setup as root to enable instant snapshots");
-    } else {
-      console.log("Thin pool: active");
-      console.log(`  Data usage:     ${status.usedDataPercent}%`);
-      console.log(`  Metadata usage: ${status.usedMetaPercent}%`);
-      console.log(`  Active volumes: ${status.thinCount}`);
-    }
-  } else if (sub === "destroy") {
-    destroyThinPool();
-    console.log("Thin pool destroyed");
-  } else {
-    console.log("Usage: hearth pool <command>");
-    console.log("");
-    console.log("Commands:");
-    console.log("  status   Show thin pool usage");
-    console.log("  destroy  Tear down thin pool");
-  }
+if (command && Object.hasOwn(commands, command)) {
+  await commands[command].run(args);
 } else {
   console.log("Usage: hearth <command>");
   console.log("");
   console.log("Commands:");
-  console.log("  setup       Download and configure all dependencies");
-  console.log("  build       Build an environment from a Hearthfile.toml");
-  console.log("  rebuild     Rebuild an existing environment from scratch");
-  console.log("  envs        List, inspect, or remove environments");
-  console.log("  claude      Launch Claude Code in an isolated sandbox");
-  console.log("  shell       Start an interactive shell in a sandbox");
-  console.log("  checkpoint  Save a running sandbox's state (restore with 'hearth claude <name>')");
-  console.log("  status      Show KSM memory deduplication and thin pool status");
-  console.log("  daemon      Start the Hearth daemon (for multi-process/remote access)");
-  console.log("  connect     Configure remote daemon connection (hearth connect <host>)");
-  console.log("  pool        Manage dm-thin snapshot pool (status, destroy)");
+  for (const [name, cmd] of Object.entries(commands)) {
+    console.log(`  ${name.padEnd(14)}${cmd.description}`);
+  }
   process.exit(command ? 1 : 0);
 }
