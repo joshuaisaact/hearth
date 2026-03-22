@@ -125,6 +125,15 @@ const simple_syscalls = [_]u32{
     // Snapshot / file metadata
     77,  // ftruncate
     262, // newfstatat
+    332, // statx (Memory.initFromFile, Blk.init)
+
+    // Epoll (run loop device polling)
+    232, // epoll_wait
+    233, // epoll_ctl
+    291, // epoll_create1
+
+    // Timers / sleep
+    35,  // nanosleep (pause backoff, SendCtrlAltDel timeout)
 
     // Clock / random
     228, // clock_gettime

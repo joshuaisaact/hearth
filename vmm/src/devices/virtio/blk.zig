@@ -100,8 +100,12 @@ pub fn processRequest(self: Self, mem: *Memory, queue: *Queue, head: u16) !void 
     const req_type = std.mem.readInt(u32, hdr_bytes[0..4], .little);
     const sector = std.mem.readInt(u64, hdr_bytes[8..16], .little);
 
-    // Status descriptor is always the last one
+    // Status descriptor is always the last one — must be device-writable
     const status_desc = descs[desc_count - 1];
+    if (status_desc.flags & virtio.DESC_F_WRITE == 0) {
+        log.err("block status descriptor is not device-writable", .{});
+        return error.MalformedRequest;
+    }
     const status_ptr = try mem.slice(@intCast(status_desc.addr), 1);
 
     // Calculate total data length across all data descriptors
@@ -117,8 +121,16 @@ pub fn processRequest(self: Self, mem: *Memory, queue: *Queue, head: u16) !void 
 
     switch (req_type) {
         T_IN => {
+            // Validate data descriptors are device-writable (VMM writes disk data into them)
+            for (descs[1 .. desc_count - 1]) |desc| {
+                if (desc.flags & virtio.DESC_F_WRITE == 0) {
+                    log.err("T_IN data descriptor is not device-writable", .{});
+                    status = S_IOERR;
+                    break;
+                }
+            }
             // Validate sector range before any I/O
-            if (!self.validateSectorRange(sector, total_data_len)) {
+            if (status == S_OK and !self.validateSectorRange(sector, total_data_len)) {
                 log.err("read past end of disk: sector={} len={}", .{ sector, total_data_len });
                 status = S_IOERR;
             } else {
@@ -146,8 +158,16 @@ pub fn processRequest(self: Self, mem: *Memory, queue: *Queue, head: u16) !void 
             }
         },
         T_OUT => {
+            // Validate data descriptors are device-readable (VMM reads guest data from them)
+            for (descs[1 .. desc_count - 1]) |desc| {
+                if (desc.flags & virtio.DESC_F_WRITE != 0) {
+                    log.err("T_OUT data descriptor is device-writable (expected readable)", .{});
+                    status = S_IOERR;
+                    break;
+                }
+            }
             // Validate sector range before any I/O
-            if (!self.validateSectorRange(sector, total_data_len)) {
+            if (status == S_OK and !self.validateSectorRange(sector, total_data_len)) {
                 log.err("write past end of disk: sector={} len={}", .{ sector, total_data_len });
                 status = S_IOERR;
             } else {

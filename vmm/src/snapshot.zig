@@ -50,8 +50,15 @@ pub fn readHeader(buf: [HEADER_SIZE]u8) !HeaderData {
         log.warn("unsupported snapshot version: {} (expected {})", .{ version, FORMAT_VERSION });
         return error.InvalidSnapshot;
     }
+    const mem_size = std.mem.readInt(u64, buf[8..16], .little);
+    // Reject unreasonable mem_size to prevent excessive mmap from crafted snapshots
+    const MAX_MEM_BYTES: u64 = 16384 * 1024 * 1024; // 16384 MiB, matches API validation
+    if (mem_size > MAX_MEM_BYTES) {
+        log.warn("snapshot mem_size {} exceeds maximum {}", .{ mem_size, MAX_MEM_BYTES });
+        return error.InvalidSnapshot;
+    }
     return .{
-        .mem_size = std.mem.readInt(u64, buf[8..16], .little),
+        .mem_size = mem_size,
         .version = version,
         .device_count = std.mem.readInt(u32, buf[20..24], .little),
     };
@@ -285,6 +292,10 @@ pub fn load(
         // Caller must have re-created device backends (via CLI --disk/--tap/--vsock-*)
         // before calling load(). We apply the saved transport/queue state on top.
         if (devices[i]) |*dev| {
+            if (dev.device_id != dev_type) {
+                log.err("device type mismatch at slot {}: snapshot has {} but backend is {}", .{ i, dev_type, dev.device_id });
+                return error.InvalidSnapshot;
+            }
             _ = dev.snapshotRestore(dev_buf[0..dev_len]);
             log.info("restore: device type {} at 0x{x} IRQ {}", .{ dev_type, mmio_base, irq });
         } else {

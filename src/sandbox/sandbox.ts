@@ -11,8 +11,6 @@ import { FlintApi } from "../vm/api.js";
 import { AgentClient } from "../agent/client.js";
 import { getVmmPath, getKernelPath, getRootfsPath, getHearthDir } from "../vm/binary.js";
 import {
-  ensureBaseSnapshot,
-  getSnapshotDir,
   ROOTFS_NAME,
   VMSTATE_NAME,
   MEMORY_NAME,
@@ -144,7 +142,11 @@ export class Sandbox {
       throw new VmBootError(`Agent failed to connect: ${errorMessage(err)}. stderr: ${stderrBuf.slice(0, 500)}`);
     }
 
-    await agent.ping();
+    const pingOk = await agent.ping();
+    if (!pingOk) {
+      cleanup();
+      throw new VmBootError("Agent ping failed after boot");
+    }
 
     return new Sandbox(proc, api, agent, runDir, id, vsockPath);
   }
@@ -244,7 +246,11 @@ export class Sandbox {
       );
     }
 
-    await agent.ping();
+    const pingOk = await agent.ping();
+    if (!pingOk) {
+      cleanup();
+      throw new VmBootError("Agent ping failed after snapshot restore");
+    }
 
     const api = new FlintApi(join(runDir, SOCKET_NAME));
     return new Sandbox(proc, api, agent, runDir, id, vsockPath);

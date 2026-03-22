@@ -111,13 +111,4 @@ export class FlintApi {
     });
   }
 
-  loadSnapshot(
-    snapshotPath: string,
-    memFilePath: string,
-  ): Promise<void> {
-    return this.request("PUT", "/snapshot/load", {
-      snapshot_path: snapshotPath,
-      mem_file_path: memFilePath,
-    });
-  }
 }

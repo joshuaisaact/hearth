@@ -205,12 +205,15 @@ fn handleBootSource(request: *http.Server.Request, body: ?[]const u8, allocator:
     };
     defer parsed.deinit();
 
+    // Free old allocations before overwriting (handles repeated PUT /boot-source)
+    if (config.kernel_path) |old| allocator.free(old);
     config.kernel_path = allocator.dupeZ(u8, parsed.value.kernel_image_path) catch {
         respondError(request, .internal_server_error, "allocation failed");
         return .err;
     };
 
     if (parsed.value.initrd_path) |p| {
+        if (config.initrd_path) |old| allocator.free(old);
         config.initrd_path = allocator.dupeZ(u8, p) catch {
             respondError(request, .internal_server_error, "allocation failed");
             return .err;
@@ -218,6 +221,7 @@ fn handleBootSource(request: *http.Server.Request, body: ?[]const u8, allocator:
     }
 
     if (parsed.value.boot_args) |a| {
+        if (config.boot_args) |old| allocator.free(old);
         config.boot_args = allocator.dupeZ(u8, a) catch {
             respondError(request, .internal_server_error, "allocation failed");
             return .err;
@@ -242,6 +246,7 @@ fn handleDrive(request: *http.Server.Request, body: ?[]const u8, allocator: std.
     };
     defer parsed.deinit();
 
+    if (config.disk_path) |old| allocator.free(old);
     config.disk_path = allocator.dupeZ(u8, parsed.value.path_on_host) catch {
         respondError(request, .internal_server_error, "allocation failed");
         return .err;
@@ -265,6 +270,7 @@ fn handleNetIface(request: *http.Server.Request, body: ?[]const u8, allocator: s
     };
     defer parsed.deinit();
 
+    if (config.tap_name) |old| allocator.free(old);
     config.tap_name = allocator.dupeZ(u8, parsed.value.host_dev_name) catch {
         respondError(request, .internal_server_error, "allocation failed");
         return .err;
@@ -299,11 +305,13 @@ fn handleVsock(request: *http.Server.Request, body: ?[]const u8, allocator: std.
         respondError(request, .internal_server_error, "format failed");
         return .err;
     };
+    if (config.vsock_cid) |old| allocator.free(old);
     config.vsock_cid = allocator.dupeZ(u8, cid_str) catch {
         respondError(request, .internal_server_error, "allocation failed");
         return .err;
     };
 
+    if (config.vsock_uds) |old| allocator.free(old);
     config.vsock_uds = allocator.dupeZ(u8, parsed.value.uds_path) catch {
         respondError(request, .internal_server_error, "allocation failed");
         return .err;
@@ -435,6 +443,15 @@ fn readBody(request: *http.Server.Request, buf: []u8) !?[]const u8 {
     return buf[0..len];
 }
 
+/// Validate that a path is a simple basename (no directory separators or traversal).
+fn isValidBasename(path: []const u8) bool {
+    if (path.len == 0) return false;
+    if (path[0] == '/') return false;
+    if (std.mem.indexOf(u8, path, "..") != null) return false;
+    if (std.mem.indexOf(u8, path, "/") != null) return false;
+    return true;
+}
+
 fn respondOk(request: *http.Server.Request) void {
     request.respond("", .{
         .status = .no_content,
@@ -474,6 +491,7 @@ const SnapshotCreateBody = struct {
 };
 
 /// Run the post-boot API server. Accepts connections until the VM exits.
+/// Uses a self-pipe to wake accept() when the VM exits, avoiding a hang.
 pub fn servePostBoot(
     sock_path: []const u8,
     io: Io,
@@ -487,6 +505,8 @@ pub fn servePostBoot(
 
     while (!runtime.exited.load(.acquire)) {
         const stream = server.accept(io) catch |err| {
+            // Check if we were woken because the VM exited
+            if (runtime.exited.load(.acquire)) break;
             log.err("accept failed: {}", .{err});
             continue;
         };
@@ -593,13 +613,20 @@ fn handleVmPatch(
         runtime.kickVcpu();
 
         // Wait for the run loop to acknowledge it has left KVM_RUN
+        var spin_count: u32 = 0;
         while (!runtime.ack_paused.load(.acquire)) {
             if (runtime.exited.load(.acquire)) {
                 runtime.paused.store(false, .release);
                 respondError(request, .bad_request, "VM has exited");
                 return;
             }
-            std.atomic.spinLoopHint();
+            spin_count += 1;
+            if (spin_count < 1000) {
+                std.atomic.spinLoopHint();
+            } else {
+                const ts = std.os.linux.timespec{ .sec = 0, .nsec = 1_000_000 }; // 1ms
+                _ = std.os.linux.nanosleep(&ts, null);
+            }
         }
         log.info("VM paused", .{});
         respondOk(request);
@@ -644,6 +671,12 @@ fn handleSnapshotCreate(
             return;
         };
         defer parsed.deinit();
+
+        // Reject paths with directory traversal or absolute paths
+        if (!isValidBasename(parsed.value.snapshot_path) or !isValidBasename(parsed.value.mem_file_path)) {
+            respondError(request, .bad_request, "paths must be relative basenames (no / or ..)");
+            return;
+        }
 
         if (parsed.value.snapshot_path.len >= sp_buf.len) {
             respondError(request, .bad_request, "snapshot_path too long");
@@ -724,20 +757,22 @@ fn handlePostBootAction(
     defer parsed.deinit();
 
     if (std.mem.eql(u8, parsed.value.action_type, "SendCtrlAltDel")) {
-        // Wait for the VM to exit (up to 5 seconds)
+        // Signal the VM to exit by setting the exited flag.
+        // The VMM doesn't emulate i8042/ACPI, so we can't inject Ctrl+Alt+Del.
+        // Instead, mark the VM as exited so the run loop terminates.
+        runtime.exited.store(true, .release);
+        // Kick the vCPU thread out of KVM_RUN so it sees the exited flag
+        runtime.kickVcpu();
+
+        // Wait briefly for the run loop to actually finish
         const linux = std.os.linux;
         var waited: u32 = 0;
-        while (waited < 50) : (waited += 1) {
+        while (waited < 20) : (waited += 1) {
             if (runtime.exited.load(.acquire)) break;
             const ts = linux.timespec{ .sec = 0, .nsec = 100_000_000 }; // 100ms
             _ = linux.nanosleep(&ts, null);
         }
-
-        if (runtime.exited.load(.acquire)) {
-            respondOk(request);
-        } else {
-            respondError(request, .internal_server_error, "VM did not exit within timeout");
-        }
+        respondOk(request);
     } else {
         respondError(request, .bad_request, "unknown action_type (post-boot supports: SendCtrlAltDel)");
     }

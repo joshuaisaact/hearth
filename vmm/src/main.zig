@@ -479,7 +479,7 @@ fn restoreVm(
     defer vm.deinit();
 
     try vm.setTssAddr(0xFFFBD000);
-    // Note: no KVM_SET_IDENTITY_MAP_ADDR — Firecracker doesn't call it
+    try vm.setIdentityMapAddr(0xFFFBC000);
 
     // irqchip and PIT must exist before snapshot.load() overwrites their state
     try vm.createIrqChip();
@@ -542,7 +542,7 @@ fn restoreVmWithApi(
     defer vm.deinit();
 
     try vm.setTssAddr(0xFFFBD000);
-    // Note: no KVM_SET_IDENTITY_MAP_ADDR — Firecracker doesn't call it
+    try vm.setIdentityMapAddr(0xFFFBC000);
     try vm.createIrqChip();
     try vm.createPit2();
 
@@ -795,7 +795,7 @@ fn installKickSignal() void {
     var sa: linux.Sigaction = .{
         .handler = .{ .handler = &sigusr1Handler },
         .mask = linux.sigemptyset(),
-        .flags = linux.SA.RESTART, // don't break other syscalls
+        .flags = 0, // must NOT use SA_RESTART — we need KVM_RUN to return -EINTR
     };
     _ = linux.sigaction(linux.SIG.USR1, &sa, null);
 }
@@ -860,11 +860,24 @@ fn runLoop(vcpu: *Vcpu, serial: *Serial, vm: *const Vm, mem: *Memory, devices: *
             // of a blocking HLT. Check if this was a pause request.
             if (err == error.Interrupted) {
                 if (runtime) |rt| {
+                    // Check if we were signaled to exit (e.g., SendCtrlAltDel)
+                    if (rt.exited.load(.acquire)) {
+                        log.info("vCPU exiting (signaled)", .{});
+                        return;
+                    }
                     if (rt.paused.load(.acquire)) {
                         rt.ack_paused.store(true, .release);
                         log.info("vCPU paused by API request", .{});
+                        var spin_count: u32 = 0;
                         while (rt.paused.load(.acquire)) {
-                            std.atomic.spinLoopHint();
+                            spin_count += 1;
+                            if (spin_count < 1000) {
+                                std.atomic.spinLoopHint();
+                            } else {
+                                // Back off to avoid burning CPU during snapshot I/O
+                                const ts = std.os.linux.timespec{ .sec = 0, .nsec = 1_000_000 }; // 1ms
+                                _ = std.os.linux.nanosleep(&ts, null);
+                            }
                         }
                         log.info("vCPU resumed", .{});
                         vcpu.kvm_run.immediate_exit = 0;

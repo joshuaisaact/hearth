@@ -141,6 +141,15 @@ fn transmitChain(self: Self, mem: *Memory, queue: *Queue, head: u16) !void {
     var descs: [16]Queue.Desc = undefined;
     const desc_count = try queue.collectChain(mem, head, &descs);
 
+    // Validate TX descriptors are device-readable (guest provides data to send)
+    for (descs[0..desc_count]) |desc| {
+        if (desc.flags & virtio.DESC_F_WRITE != 0) {
+            log.err("TX descriptor is device-writable (expected readable)", .{});
+            try queue.pushUsed(mem, head, 0);
+            return;
+        }
+    }
+
     // Build iovec from collected descriptors for writev
     var iov: [16]std.posix.iovec = undefined;
     for (descs[0..desc_count], 0..) |desc, i| {
@@ -198,6 +207,14 @@ fn receiveFrame(self: Self, mem: *Memory, queue: *Queue, head: u16) !u32 {
     // Collect all descriptors upfront (with cycle detection)
     var descs: [16]Queue.Desc = undefined;
     const desc_count = try queue.collectChain(mem, head, &descs);
+
+    // Validate RX descriptors are device-writable (VMM writes frame data into them)
+    for (descs[0..desc_count]) |desc| {
+        if (desc.flags & virtio.DESC_F_WRITE == 0) {
+            log.err("RX descriptor is not device-writable", .{});
+            return 0;
+        }
+    }
 
     // Build iovec from collected descriptors for readv
     var iov: [16]std.posix.iovec = undefined;

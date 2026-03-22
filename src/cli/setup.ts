@@ -91,7 +91,15 @@ async function setupFlint() {
 
   const vmmDir = findVmmDir();
   console.log("  flint: building with Zig...");
-  execSync("zig build -Doptimize=ReleaseSafe", { cwd: vmmDir, stdio: "pipe" });
+  try {
+    execSync("zig build -Doptimize=ReleaseSafe", { cwd: vmmDir, stdio: "pipe" });
+  } catch (err: unknown) {
+    const e = err as { stderr?: Buffer };
+    if (e.stderr) {
+      console.error(e.stderr.toString());
+    }
+    throw err;
+  }
   copyFileSync(join(vmmDir, "zig-out", "bin", "flint"), flintPath);
   chmodSync(flintPath, 0o755);
   console.log("  flint: built and installed");

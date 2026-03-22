@@ -417,8 +417,10 @@ fn handleRw(self: *Self, mem: *Memory, descs: []const Queue.Desc, desc_count: us
 
     // Write payload from data descriptors to host socket
     var remaining: u32 = payload_len;
-    for (descs[1..desc_count]) |desc| {
+    var desc_idx: usize = 1; // start after header descriptor
+    while (desc_idx < desc_count) : (desc_idx += 1) {
         if (remaining == 0) break;
+        const desc = descs[desc_idx];
         const chunk_len = @min(desc.len, remaining);
         const buf = mem.slice(@intCast(desc.addr), chunk_len) catch {
             log.err("RW: bad guest address", .{});
@@ -435,10 +437,12 @@ fn handleRw(self: *Self, mem: *Memory, descs: []const Queue.Desc, desc_count: us
                     const unsent = buf[written..chunk_len];
                     const stashed = conn.stashWrite(unsent);
                     conn.rx_cnt +%= @intCast(written + stashed);
-                    // Stash remaining descriptors too
+                    // Stash remaining descriptors starting from the NEXT one
                     remaining -= chunk_len;
-                    for (descs[1..desc_count]) |rem_desc| {
+                    var rem_idx = desc_idx + 1;
+                    while (rem_idx < desc_count) : (rem_idx += 1) {
                         if (remaining == 0) break;
+                        const rem_desc = descs[rem_idx];
                         const rem_len = @min(rem_desc.len, remaining);
                         const rem_buf = mem.slice(@intCast(rem_desc.addr), rem_len) catch break;
                         const rem_stashed = conn.stashWrite(rem_buf[0..rem_len]);
