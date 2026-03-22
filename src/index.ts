@@ -10,4 +10,4 @@ export type { SpawnHandle } from "./agent/client.js";
 export type { SnapshotInfo, ExecResult, ExecOptions, SpawnOptions, CreateOptions } from "./sandbox/types.js";
 export { enableKsm, getKsmStats, tuneKsm, initKsm, KsmError, KsmPermissionError, KsmParseError } from "./vm/ksm.js";
 export type { KsmStats, KsmTuneOptions } from "./vm/ksm.js";
-export { HearthError, VmBootError, ExecError, TimeoutError, AgentError, ResourceError } from "./errors.js";
+export { HearthError, VmBootError, ExecError, TimeoutError, AgentError, ResourceError, isNodeError, isPermissionError } from "./errors.js";

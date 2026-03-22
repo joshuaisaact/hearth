@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { HearthError } from "../errors.js";
+import { HearthError, isPermissionError } from "../errors.js";
 
 const MAX_PAGES_TO_SCAN = 10000;
 const MAX_SLEEP_MS = 1000;
@@ -58,14 +58,6 @@ function validateName(name: string): void {
   if (!VALID_KSM_FILES.test(name)) {
     throw new KsmError(`Invalid KSM parameter name: ${name}`);
   }
-}
-
-function isNodeError(err: unknown): err is NodeJS.ErrnoException {
-  return err instanceof Error && "code" in err;
-}
-
-function isPermissionError(err: unknown): boolean {
-  return isNodeError(err) && (err.code === "EACCES" || err.code === "EPERM");
 }
 
 function shellQuote(s: string): string {
