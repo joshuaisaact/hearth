@@ -216,6 +216,16 @@ pub fn kvmclockCtrl(self: Self) !void {
     try abi.ioctlVoid(self.fd, 0xAED5, 0); // KVM_KVMCLOCK_CTRL
 }
 
+pub fn getXsave(self: Self) !c.kvm_xsave {
+    var xsave: c.kvm_xsave = undefined;
+    try abi.ioctlVoid(self.fd, c.KVM_GET_XSAVE, @intFromPtr(&xsave));
+    return xsave;
+}
+
+pub fn setXsave(self: Self, xsave: *const c.kvm_xsave) !void {
+    try abi.ioctlVoid(self.fd, c.KVM_SET_XSAVE, @intFromPtr(xsave));
+}
+
 pub const IoExit = struct {
     direction: u8,
     port: u16,

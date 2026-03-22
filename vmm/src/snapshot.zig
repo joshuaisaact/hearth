@@ -99,6 +99,9 @@ pub fn save(
     const xcrs = try vcpu.getXcrs();
     try writeAll(state_fd, std.mem.asBytes(&xcrs));
 
+    const xsave = try vcpu.getXsave();
+    try writeAll(state_fd, std.mem.asBytes(&xsave));
+
     const lapic = try vcpu.getLapic();
     try writeAll(state_fd, std.mem.asBytes(&lapic));
 
@@ -197,6 +200,9 @@ pub fn load(
     var xcrs: c.kvm_xcrs = undefined;
     try readExact(state_fd, std.mem.asBytes(&xcrs));
 
+    var xsave: c.kvm_xsave = undefined;
+    try readExact(state_fd, std.mem.asBytes(&xsave));
+
     var lapic: c.kvm_lapic_state = undefined;
     try readExact(state_fd, std.mem.asBytes(&lapic));
 
@@ -213,11 +219,12 @@ pub fn load(
 
     // --- Restore vCPU state FIRST (matches Firecracker's order) ---
     // Memory region must be registered by the caller BEFORE this function.
-    // Order: CPUID → mp_state → regs → sregs → xcrs → LAPIC → MSRs → events
+    // Order matches Firecracker: CPUID → mp_state → regs → sregs → xsave → xcrs → LAPIC → MSRs → events
     try vcpu.setCpuid(&cpuid);
     try vcpu.setMpState(&mp_state);
     try vcpu.setRegs(&regs);
     try vcpu.setSregs(&sregs);
+    try vcpu.setXsave(&xsave);
     try vcpu.setXcrs(&xcrs);
     try vcpu.setLapic(&lapic);
     try vcpu.setMsrs(&msrs);
