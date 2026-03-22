@@ -9,7 +9,7 @@ import {
   getRootfsPath,
   getHearthDir,
 } from "./binary.js";
-import { VmBootError } from "../errors.js";
+import { VmBootError, ResourceError } from "../errors.js";
 import { waitForFile, errorMessage } from "../util.js";
 
 const SNAPSHOT_DIR = join(getHearthDir(), "snapshots", "base");
@@ -31,7 +31,7 @@ let baseSnapshotMemoryMib: number | null = null;
 
 export function ensureBaseSnapshot(memoryMib: number = DEFAULT_MEMORY_MIB): Promise<void> {
   if (!Number.isInteger(memoryMib) || memoryMib < MIN_MEMORY_MIB || memoryMib > MAX_MEMORY_MIB) {
-    throw new Error(`memoryMib must be an integer between ${MIN_MEMORY_MIB} and ${MAX_MEMORY_MIB}, got ${memoryMib}`);
+    throw new ResourceError(`memoryMib must be an integer between ${MIN_MEMORY_MIB} and ${MAX_MEMORY_MIB}, got ${memoryMib}`);
   }
   if (baseSnapshotReady) {
     if (baseSnapshotMemoryMib !== null && memoryMib !== baseSnapshotMemoryMib) {
