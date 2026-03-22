@@ -213,7 +213,7 @@ pub fn setMsrs(self: Self, buf: *const MsrBuffer) !void {
 /// Notify KVM that the guest was paused (prevents soft lockup watchdog
 /// false positives on resume). Non-fatal if the guest doesn't support kvmclock.
 pub fn kvmclockCtrl(self: Self) !void {
-    try abi.ioctlVoid(self.fd, 0xAED5, 0); // KVM_KVMCLOCK_CTRL
+    try abi.ioctlVoid(self.fd, c.KVM_KVMCLOCK_CTRL, 0);
 }
 
 pub fn getXsave(self: Self) !c.kvm_xsave {

@@ -233,7 +233,9 @@ pub fn load(
     // KVM_KVMCLOCK_CTRL: notify the host that the guest was paused.
     // Prevents soft lockup watchdog false positives on resume.
     // Errors are non-fatal (guest may not support kvmclock).
-    vcpu.kvmclockCtrl() catch {};
+    vcpu.kvmclockCtrl() catch |err| {
+        log.warn("KVM_KVMCLOCK_CTRL failed (non-fatal): {}", .{err});
+    };
 
     // --- Read VM state from file (in file order: irqchip, PIT, clock) ---
     var irqchips: [3][Vm.IRQCHIP_SIZE]u8 = undefined;

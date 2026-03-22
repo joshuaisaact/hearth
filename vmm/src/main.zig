@@ -878,6 +878,7 @@ fn runLoop(vcpu: *Vcpu, serial: *Serial, vm: *const Vm, mem: *Memory, devices: *
         };
         exit_count +%= 1;
 
+
         // Flush pending vsock write buffers
         for (devices[0..device_count]) |*dev_opt| {
             if (dev_opt.*) |*dev| dev.flushPendingWrites();
