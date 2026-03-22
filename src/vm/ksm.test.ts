@@ -25,7 +25,6 @@ function stubKsmFiles(files: Record<string, string>) {
 
 beforeEach(() => {
   vi.resetAllMocks();
-  // Re-stub execFileSync after reset so PAGE_SIZE stays consistent
   vi.mocked(execFileSync).mockReturnValue(Buffer.from("4096\n"));
 });
 
@@ -112,15 +111,10 @@ describe("getKsmStats", () => {
 });
 
 describe("name validation", () => {
-  it("rejects path traversal in file names", () => {
-    expect(() => {
-      // enableKsm reads "run" which is valid, but we test the internal validation
-      // indirectly by checking that the module never writes outside /sys/kernel/mm/ksm/
-      stubKsmFiles({ run: "0" });
-      enableKsm();
-      // Verify the written path is the expected sysfs path
-      expect(mockWrite).toHaveBeenCalledWith("/sys/kernel/mm/ksm/run", "1");
-    }).not.toThrow();
+  it("allows valid sysfs names", () => {
+    stubKsmFiles({ run: "0" });
+    enableKsm();
+    expect(mockWrite).toHaveBeenCalledWith("/sys/kernel/mm/ksm/run", "1");
   });
 });
 
@@ -135,6 +129,18 @@ describe("tuneKsm", () => {
     tuneKsm({ pagesToScan: 2000, sleepMs: 50 });
     expect(mockWrite).toHaveBeenCalledWith("/sys/kernel/mm/ksm/pages_to_scan", "2000");
     expect(mockWrite).toHaveBeenCalledWith("/sys/kernel/mm/ksm/sleep_millisecs", "50");
+  });
+
+  it("rejects invalid pagesToScan", () => {
+    expect(() => tuneKsm({ pagesToScan: 0 })).toThrow("pagesToScan must be an integer between 1 and 10000");
+    expect(() => tuneKsm({ pagesToScan: -1 })).toThrow("pagesToScan");
+    expect(() => tuneKsm({ pagesToScan: 99999 })).toThrow("pagesToScan");
+  });
+
+  it("rejects invalid sleepMs", () => {
+    expect(() => tuneKsm({ sleepMs: 0 })).toThrow("sleepMs must be an integer between 1 and 1000");
+    expect(() => tuneKsm({ sleepMs: -5 })).toThrow("sleepMs");
+    expect(() => tuneKsm({ sleepMs: 9999 })).toThrow("sleepMs");
   });
 });
 
@@ -152,11 +158,18 @@ describe("initKsm", () => {
     expect(initKsm()).toBe(false);
   });
 
-  it("re-throws non-permission errors", () => {
+  it("returns false on any error without throwing", () => {
     stubKsmFiles({ run: "0" });
     mockWrite.mockImplementation(() => {
       throw new Error("disk on fire");
     });
-    expect(() => initKsm()).toThrow("disk on fire");
+    expect(initKsm()).toBe(false);
+  });
+
+  it("returns false when KSM sysfs is missing", () => {
+    mockRead.mockImplementation(() => {
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    });
+    expect(initKsm()).toBe(false);
   });
 });

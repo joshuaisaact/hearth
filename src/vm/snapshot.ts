@@ -87,6 +87,7 @@ async function createBaseSnapshotIfNeeded(memoryMib: number): Promise<void> {
     try { proc.kill("SIGKILL"); } catch {}
     rmSync(SNAPSHOT_DIR, { recursive: true, force: true });
     baseSnapshotReady = null;
+    baseSnapshotMemoryMib = null;
   };
 
   try {

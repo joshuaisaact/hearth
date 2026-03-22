@@ -38,7 +38,6 @@ function userSnapshotDir(name: string): string {
 }
 
 const activeSandboxes = new Set<Sandbox>();
-let ksmInitialised = false;
 
 process.on("exit", () => {
   for (const sb of activeSandboxes) {
@@ -80,10 +79,7 @@ export class Sandbox {
 
   /** Create a sandbox from the base snapshot. */
   static async create(opts?: CreateOptions): Promise<Sandbox> {
-    if (!ksmInitialised) {
-      ksmInitialised = true;
-      try { initKsm(); } catch {} // best-effort, no-op without root or KSM
-    }
+    initKsm(); // best-effort, idempotent, never throws
     await ensureBaseSnapshot(opts?.memoryMib);
     return Sandbox.restoreFromDir(getSnapshotDir());
   }

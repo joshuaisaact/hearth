@@ -1,6 +1,9 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
+const MAX_PAGES_TO_SCAN = 10000;
+const MAX_SLEEP_MS = 1000;
+
 const KSM_BASE = "/sys/kernel/mm/ksm";
 const VALID_KSM_FILES = /^[a-z_]+$/;
 
@@ -39,6 +42,10 @@ function readKsmFile(name: string): string {
   return readFileSync(`${KSM_BASE}/${name}`, "utf-8").trim();
 }
 
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
 function writeKsmFile(name: string, value: string): void {
   validateName(name);
   try {
@@ -46,7 +53,7 @@ function writeKsmFile(name: string, value: string): void {
   } catch (err) {
     if (isPermissionError(err)) {
       throw new Error(
-        `KSM requires root privileges. Run hearth setup with sudo, or manually: echo '${value}' | sudo tee '${KSM_BASE}/${name}'`,
+        `KSM requires root privileges. Run hearth setup with sudo, or manually: echo ${shellQuote(value)} | sudo tee ${shellQuote(`${KSM_BASE}/${name}`)}`,
       );
     }
     throw err;
@@ -94,13 +101,18 @@ function parseKsmInt(name: string): number {
 }
 
 /** System page size in bytes. 4096 on x86_64, may be 65536 on aarch64. */
-const PAGE_SIZE = (() => {
-  try {
-    return parseInt(execFileSync("getconf", ["PAGE_SIZE"], { stdio: "pipe" }).toString().trim(), 10) || 4096;
-  } catch {
-    return 4096;
+let pageSize: number | null = null;
+function getPageSize(): number {
+  if (pageSize === null) {
+    try {
+      const parsed = parseInt(execFileSync("getconf", ["PAGE_SIZE"], { stdio: "pipe" }).toString().trim(), 10);
+      pageSize = Number.isNaN(parsed) ? 4096 : parsed;
+    } catch {
+      pageSize = 4096;
+    }
   }
-})();
+  return pageSize;
+}
 
 /**
  * Read current KSM statistics.
@@ -111,7 +123,7 @@ export function getKsmStats(): KsmStats {
   const pagesSharing = parseKsmInt("pages_sharing");
   const pagesUnshared = parseKsmInt("pages_unshared");
   const fullScans = parseKsmInt("full_scans");
-  const bytesSaved = pagesSharing * PAGE_SIZE;
+  const bytesSaved = pagesSharing * getPageSize();
 
   return {
     pagesShared,
@@ -131,23 +143,26 @@ export function getKsmStats(): KsmStats {
  */
 export function tuneKsm(opts: KsmTuneOptions = {}): void {
   const { pagesToScan = 1000, sleepMs = 20 } = opts;
+  if (!Number.isInteger(pagesToScan) || pagesToScan < 1 || pagesToScan > MAX_PAGES_TO_SCAN) {
+    throw new Error(`pagesToScan must be an integer between 1 and ${MAX_PAGES_TO_SCAN}, got ${pagesToScan}`);
+  }
+  if (!Number.isInteger(sleepMs) || sleepMs < 1 || sleepMs > MAX_SLEEP_MS) {
+    throw new Error(`sleepMs must be an integer between 1 and ${MAX_SLEEP_MS}, got ${sleepMs}`);
+  }
   writeKsmFile("pages_to_scan", String(pagesToScan));
   writeKsmFile("sleep_millisecs", String(sleepMs));
 }
 
 /**
- * Enable and tune KSM in one call. Returns true if successful.
- * On permission errors, logs a warning and returns false (does not throw).
+ * Enable and tune KSM in one call. Returns true if successful,
+ * false on any error (permission, missing sysfs, etc.). Never throws.
  */
 export function initKsm(): boolean {
   try {
     enableKsm();
     tuneKsm();
     return true;
-  } catch (err) {
-    if (err instanceof Error && err.message.includes("KSM requires root")) {
-      return false;
-    }
-    throw err;
+  } catch {
+    return false;
   }
 }
