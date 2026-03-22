@@ -117,37 +117,68 @@ function findVmmDir(): string {
 }
 
 async function setupKernel() {
-  const kernelPath = join(BASES_DIR, "vmlinux");
-  if (existsSync(kernelPath)) {
-    console.log("  kernel: already installed");
+  // Prefer bzImage for snapshot restore support (ELF vmlinux breaks resume from HLT)
+  const bzImagePath = join(BASES_DIR, "bzImage");
+  if (existsSync(bzImagePath)) {
+    console.log("  kernel: already installed (bzImage)");
+    return;
+  }
+
+  // Also accept legacy ELF vmlinux (fresh boot still works)
+  const vmlinuxPath = join(BASES_DIR, "vmlinux");
+  if (existsSync(vmlinuxPath)) {
+    console.log("  kernel: already installed (vmlinux, no snapshot restore support)");
     return;
   }
 
   const architecture = fcArch();
 
-  // Download vmlinux from Firecracker CI S3 bucket (ELF format with virtio built-in).
-  // We use the 5.10.x kernel because it has CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y,
-  // which Flint needs for virtio device discovery via kernel cmdline parameters.
-  // The 6.1.x kernel dropped this config option and requires device tree / ACPI.
-  console.log("  kernel: finding latest from Firecracker CI...");
-  const { fetchText } = await import("./download.js");
-  const listUrl = `http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/v1.15/${architecture}/vmlinux-5.10&list-type=2`;
-  const xml = await fetchText(listUrl);
+  // Build a 5.10 bzImage from source using the Firecracker CI kernel config.
+  // We need bzImage format (not ELF vmlinux) because the kernel's own setup header
+  // is required for snapshot restore — the ELF loader synthesizes boot_params from
+  // scratch, and the synthetic values break resume from HLT after snapshot restore.
+  // The 5.10 kernel is used because it has CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y.
+  console.log("  kernel: building 5.10 bzImage from source (requires Docker)...");
 
-  const keys = [...xml.matchAll(/<Key>(firecracker-ci\/[^<]+\/vmlinux-5\.10[\d.]+)<\/Key>/g)]
-    .map((m) => m[1])
-    .sort();
-
-  if (keys.length === 0) {
-    throw new Error("No kernel found in Firecracker CI S3 bucket");
+  // Download source
+  const kernelVersion = "5.10.245";
+  const srcDir = join(tmpdir(), `linux-${kernelVersion}`);
+  if (!existsSync(join(srcDir, "Makefile"))) {
+    const tarUrl = `https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-${kernelVersion}.tar.xz`;
+    const tarPath = join(tmpdir(), `linux-${kernelVersion}.tar.xz`);
+    console.log(`  kernel: downloading source (linux-${kernelVersion})...`);
+    await download(tarUrl, tarPath);
+    execSync(`tar xf ${tarPath}`, { cwd: tmpdir(), stdio: "pipe" });
+    rmSync(tarPath, { force: true });
   }
 
-  const latestKey = keys[keys.length - 1];
-  const kernelUrl = `https://s3.amazonaws.com/spec.ccfc.min/${latestKey}`;
+  // Download Firecracker CI config
+  const configUrl = `http://spec.ccfc.min.s3.amazonaws.com/firecracker-ci/v1.15/${architecture}/vmlinux-${kernelVersion}.config`;
+  const { fetchText } = await import("./download.js");
+  const configText = await fetchText(configUrl);
+  writeFileSync(join(srcDir, ".config"), configText);
 
-  console.log(`  kernel: downloading ${latestKey.split("/").pop()}...`);
-  await download(kernelUrl, kernelPath);
-  console.log("  kernel: installed");
+  // Build bzImage in Docker (host GCC may be too new for 5.10)
+  console.log("  kernel: compiling bzImage (this takes ~2 minutes)...");
+  try {
+    execSync(
+      `docker run --rm -v ${srcDir}:/src -w /src gcc:12 bash -c ` +
+      `'apt-get update -qq && apt-get install -y -qq bc flex bison libelf-dev >/dev/null 2>&1 && make olddefconfig >/dev/null 2>&1 && make -j$(nproc) bzImage'`,
+      { stdio: "pipe", timeout: 600000 },
+    );
+  } catch (err: unknown) {
+    const e = err as { stderr?: Buffer };
+    if (e.stderr) console.error(e.stderr.toString().slice(-500));
+    throw new Error("Kernel build failed. Ensure Docker is available.");
+  }
+
+  const builtPath = join(srcDir, "arch", "x86", "boot", "bzImage");
+  if (!existsSync(builtPath)) {
+    throw new Error("bzImage not found after build");
+  }
+
+  copyFileSync(builtPath, bzImagePath);
+  console.log("  kernel: bzImage built and installed");
 }
 
 async function setupAgent() {

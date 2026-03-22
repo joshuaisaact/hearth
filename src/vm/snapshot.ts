@@ -134,6 +134,12 @@ async function createBaseSnapshotIfNeeded(memoryMib: number): Promise<void> {
 
   agent.close();
 
+  // Wait briefly for the guest to settle into HLT (idle) after the agent
+  // disconnects. The snapshot captures mp_state — if the vCPU is RUNNABLE
+  // (mid-execution) instead of HALTED (in HLT), restore fails because
+  // KVM can't properly resume mid-instruction context.
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
   try {
     await api.pause();
     await api.createSnapshot(VMSTATE_NAME, MEMORY_NAME);

@@ -20,7 +20,7 @@ const c = abi.c;
 const log = std.log.scoped(.snapshot);
 
 const MAGIC = "FLINTSNP".*;
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2; // v2: added debug_regs, dynamic MSR list
 
 // Manually serialized to avoid alignment padding issues with extern/packed structs.
 // Layout: magic(8) + mem_size(8) + version(4) + device_count(4) + reserved(8) = 32 bytes
@@ -119,6 +119,9 @@ pub fn save(
     var msrs: Vcpu.MsrBuffer = undefined;
     try vcpu.getMsrs(&msrs);
     try writeAll(state_fd, std.mem.asBytes(&msrs));
+
+    const debug_regs = try vcpu.getDebugRegs();
+    try writeAll(state_fd, std.mem.asBytes(&debug_regs));
 
     // vcpu_events last: contains pending exceptions that other GETs might affect
     const events = try vcpu.getVcpuEvents();
@@ -221,12 +224,15 @@ pub fn load(
     try readExact(state_fd, std.mem.asBytes(&msrs));
     if (msrs.nmsrs > Vcpu.MAX_MSR_ENTRIES) return error.InvalidSnapshot;
 
+    var debug_regs: c.kvm_debugregs = undefined;
+    try readExact(state_fd, std.mem.asBytes(&debug_regs));
+
     var events: c.kvm_vcpu_events = undefined;
     try readExact(state_fd, std.mem.asBytes(&events));
 
     // --- Restore vCPU state FIRST (matches Firecracker's order) ---
     // Memory region must be registered by the caller BEFORE this function.
-    // Order matches Firecracker: CPUID → mp_state → regs → sregs → xsave → xcrs → LAPIC → MSRs → events
+    // Order matches Firecracker: CPUID → mp_state → regs → sregs → xsave → xcrs → LAPIC → MSRs → debug_regs → events
     try vcpu.setCpuid(&cpuid);
     try vcpu.setMpState(&mp_state);
     try vcpu.setRegs(&regs);
@@ -235,6 +241,7 @@ pub fn load(
     try vcpu.setXcrs(&xcrs);
     try vcpu.setLapic(&lapic);
     try vcpu.setMsrs(&msrs);
+    try vcpu.setDebugRegs(&debug_regs);
     try vcpu.setVcpuEvents(&events);
 
     // KVM_KVMCLOCK_CTRL: notify the host that the guest was paused.

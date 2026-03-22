@@ -199,21 +199,70 @@ pub const snapshot_msr_indices = [_]u32{
     0xC0000102, // MSR_KERNEL_GS_BASE
 };
 
-/// Populate buffer with MSR indices and read their current values.
+/// Populate buffer with all MSRs the host supports, then read their current values.
+/// Uses KVM_GET_MSR_INDEX_LIST for dynamic discovery (like Firecracker) instead
+/// of a hardcoded list, ensuring we capture all CPU state needed for snapshot restore.
 pub fn getMsrs(self: Self, buf: *MsrBuffer) !void {
-    buf.nmsrs = snapshot_msr_indices.len;
-    buf.pad = 0;
-    for (snapshot_msr_indices, 0..) |idx, i| {
-        buf.entries[i] = .{ .index = idx, .reserved = 0, .data = 0 };
+    // Try dynamic MSR discovery via KVM_GET_MSR_INDEX_LIST on /dev/kvm
+    const discovered = getMsrIndexList(buf);
+
+    if (!discovered) {
+        // Fallback to hardcoded list if dynamic discovery fails
+        buf.nmsrs = snapshot_msr_indices.len;
+        buf.pad = 0;
+        for (snapshot_msr_indices, 0..) |idx, i| {
+            buf.entries[i] = .{ .index = idx, .reserved = 0, .data = 0 };
+        }
     }
+
     // KVM_GET_MSRS returns the number actually read via the ioctl return value.
-    // Some MSRs may not be accessible; nmsrs is updated to the count read.
     const rc = abi.ioctl(self.fd, c.KVM_GET_MSRS, @intFromPtr(buf));
     const read_count: u32 = @intCast(rc catch return error.VmRunFailed);
-    if (read_count != snapshot_msr_indices.len) {
-        log.warn("KVM_GET_MSRS: requested {} got {} (some MSRs not accessible)", .{ snapshot_msr_indices.len, read_count });
+    if (read_count != buf.nmsrs) {
+        log.warn("KVM_GET_MSRS: requested {} got {} (some MSRs not accessible)", .{ buf.nmsrs, read_count });
         buf.nmsrs = read_count;
     }
+    log.info("saved {} MSRs", .{buf.nmsrs});
+}
+
+/// Query KVM for the full list of MSR indices the host supports.
+/// Returns true if successful, false if the ioctl isn't available.
+fn getMsrIndexList(buf: *MsrBuffer) bool {
+    // KVM_GET_MSR_INDEX_LIST uses a struct { nmsrs: u32, indices: [nmsrs]u32 }.
+    // We reuse MsrBuffer's memory layout: nmsrs at offset 0, then we need
+    // indices packed at offset 4 (no pad). But MsrBuffer has pad at offset 4.
+    // So we use a separate stack buffer for the ioctl, then copy indices out.
+    const MsrList = extern struct {
+        nmsrs: u32,
+        indices: [MAX_MSR_ENTRIES]u32,
+    };
+    var list: MsrList = undefined;
+    list.nmsrs = MAX_MSR_ENTRIES;
+
+    // Open /dev/kvm temporarily for the system-level ioctl
+    const kvm_fd: i32 = blk: {
+        const rc: isize = @bitCast(std.os.linux.open("/dev/kvm", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0));
+        if (rc < 0) return false;
+        break :blk @intCast(rc);
+    };
+    defer abi.close(kvm_fd);
+
+    const rc = abi.ioctl(kvm_fd, c.KVM_GET_MSR_INDEX_LIST, @intFromPtr(&list)) catch {
+        return false;
+    };
+    _ = rc;
+
+    if (list.nmsrs == 0 or list.nmsrs > MAX_MSR_ENTRIES) return false;
+
+    // Populate the MsrBuffer with discovered indices
+    buf.nmsrs = list.nmsrs;
+    buf.pad = 0;
+    for (list.indices[0..list.nmsrs], 0..) |idx, i| {
+        buf.entries[i] = .{ .index = idx, .reserved = 0, .data = 0 };
+    }
+
+    log.info("discovered {} MSR indices via KVM_GET_MSR_INDEX_LIST", .{list.nmsrs});
+    return true;
 }
 
 pub fn setMsrs(self: Self, buf: *const MsrBuffer) !void {
@@ -241,6 +290,16 @@ pub fn getXsave(self: Self) !c.kvm_xsave {
 
 pub fn setXsave(self: Self, xsave: *const c.kvm_xsave) !void {
     try abi.ioctlVoid(self.fd, c.KVM_SET_XSAVE, @intFromPtr(xsave));
+}
+
+pub fn getDebugRegs(self: Self) !c.kvm_debugregs {
+    var dregs: c.kvm_debugregs = undefined;
+    try abi.ioctlVoid(self.fd, c.KVM_GET_DEBUGREGS, @intFromPtr(&dregs));
+    return dregs;
+}
+
+pub fn setDebugRegs(self: Self, dregs: *const c.kvm_debugregs) !void {
+    try abi.ioctlVoid(self.fd, c.KVM_SET_DEBUGREGS, @intFromPtr(dregs));
 }
 
 pub const IoExit = struct {

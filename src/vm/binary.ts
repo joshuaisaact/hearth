@@ -15,6 +15,11 @@ export function getVmmPath(): string {
 }
 
 export function getKernelPath(): string {
+  // Prefer bzImage over ELF vmlinux — bzImage is required for snapshot restore
+  // (the ELF loader's synthetic boot_params breaks resume from HLT)
+  const bzImage = join(HEARTH_DIR, "bases", "bzImage");
+  if (existsSync(bzImage)) return bzImage;
+
   const kernel = join(HEARTH_DIR, "bases", "vmlinux");
   if (existsSync(kernel)) return kernel;
 

@@ -11,12 +11,13 @@ import { FlintApi } from "../vm/api.js";
 import { AgentClient } from "../agent/client.js";
 import { getVmmPath, getKernelPath, getRootfsPath, getHearthDir } from "../vm/binary.js";
 import {
+  ensureBaseSnapshot,
+  getSnapshotDir,
   ROOTFS_NAME,
   VMSTATE_NAME,
   MEMORY_NAME,
   VSOCK_NAME,
   SOCKET_NAME,
-  DEFAULT_MEMORY_MIB,
 } from "../vm/snapshot.js";
 import { startProxy, PROXY_URL, PROXY_GUEST_PORT } from "../network/proxy.js";
 import { VmBootError, TimeoutError } from "../errors.js";
@@ -69,10 +70,11 @@ export class Sandbox {
     activeSandboxes.add(this);
   }
 
-  /** Create a sandbox by booting a fresh VM. */
+  /** Create a sandbox from the base snapshot (fast path, ~135ms). */
   static async create(opts?: CreateOptions): Promise<Sandbox> {
     initKsm(); // best-effort, idempotent, never throws
-    return Sandbox.freshBoot(opts?.memoryMib ?? DEFAULT_MEMORY_MIB);
+    await ensureBaseSnapshot(opts?.memoryMib);
+    return Sandbox.restoreFromDir(getSnapshotDir());
   }
 
   /** Boot a fresh VM from the rootfs (no snapshot restore). */
