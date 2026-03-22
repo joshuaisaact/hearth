@@ -2,20 +2,27 @@
 
 ## What was done
 
-Replaced Firecracker (downloaded binary, v1.15.0) with Flint (custom Zig VMM built from source) as Hearth's underlying VM engine. PR #13.
+Replaced Firecracker (downloaded binary, v1.15.0) with Flint (custom Zig VMM built from source) as Hearth's underlying VM engine.
 
 ### Completed
 - Flint VMM source copied to `vmm/`, stripped of redundant files (agent, pool, sandbox)
 - `FirecrackerApi` → `FlintApi` with Flint-compatible payloads
 - Setup builds Flint from source (`zig build -Doptimize=ReleaseSafe`)
+- Setup downloads pre-built 5.10.245 bzImage from GitHub releases
 - Deleted dm-thin provisioning (~360 lines), always use `cp --reflink=auto`
 - Removed pool CLI command, thin pool from status/setup
 - ELF vmlinux loader added to Flint (alongside existing bzImage support)
-- `Sandbox.create()` → `exec()` → `destroy()` works end-to-end via fresh boot
+- Snapshot restore working — `Sandbox.create()` ~145ms via snapshot restore
+- Code review fixes: SA_RESTART deadlock, seccomp gaps, virtio descriptor validation, path traversal checks, spin loop backoff, jail permissions
 
-### Architecture change
-- `Sandbox.create()` now does a **fresh boot** (~6s) instead of snapshot restore (~135ms)
-- This is a temporary workaround — snapshot restore has a KVM vCPU resume bug
+### Performance
+
+| Operation | Firecracker (old) | Flint (current) |
+|-----------|------------------|-----------------|
+| Setup | ~60s (download FC) | ~30s (build Flint + download kernel) |
+| Sandbox.create() | ~135ms | ~145ms |
+| exec() | ~2ms | ~2ms |
+| destroy() | instant | instant |
 
 ---
 
@@ -56,57 +63,20 @@ Replaced Firecracker (downloaded binary, v1.15.0) with Flint (custom Zig VMM bui
 **Root cause:** `Promise.all([putMachineConfig, putBootSource, putDrive, putVsock])` could cause `InstanceStart` to be processed before all config was received.
 **Fix:** Sequential API calls.
 
----
+### 8. ELF vmlinux breaks snapshot restore
+**Symptom:** After snapshot restore, `KVM_RUN` blocks forever with zero VM exits (ELF kernel) or 5 MMIO exits then stuck (with other fixes applied).
+**Root cause:** The ELF loader synthesizes the entire `boot_params` struct from scratch with hardcoded values. On snapshot restore, the kernel re-reads `boot_params` from guest memory during resume code paths and the synthetic values are wrong. bzImage format works because the kernel's own setup header (at offset 0x1F1) provides authoritative `boot_params`.
+**Fix:** Switch from ELF vmlinux to bzImage kernel format. Pre-built 5.10.245 bzImage hosted on GitHub releases.
 
-## Unresolved: Snapshot restore KVM_RUN hang
+### 9. Snapshot captured with vCPU in wrong state
+**Symptom:** Restored VM hangs — `mp_state=0` (RUNNABLE) with `rip` mid-execution instead of `mp_state=3` (HALTED).
+**Root cause:** `ensureBaseSnapshot()` paused the VM immediately after `agent.ping()` returned, before the guest had time to settle back into HLT. The vCPU was captured mid-instruction.
+**Fix:** 200ms delay after `agent.close()` before pausing, so the vCPU enters HALTED state.
 
-### Symptom
-After restoring all KVM state from a snapshot, `KVM_RUN` blocks forever. The vCPU never exits. Zero VM exits in any timeout period.
-
-### What we tried
-- Matching Firecracker's exact restore order (vCPU state first, VM state second)
-- Memory region registered before vCPU state
-- `KVM_KVMCLOCK_CTRL` after vCPU restore
-- Adding xsave save/restore
-- Adding x2APIC MSR range (0x800-0x83F) to save/restore
-- Adding KVM paravirt MSRs (kvm-clock, steal time, async PF)
-- Removing `KVM_SET_IDENTITY_MAP_ADDR` (Firecracker doesn't call it)
-- Disabling APICv (`enable_apicv=0`)
-- Forcing `mp_state = KVM_MP_STATE_RUNNABLE`
-- Injecting IRQ 0 (PIT) after restore via `KVM_IRQ_LINE`
-- `immediate_exit` KVM_RUN cycle before real KVM_RUN
-- Artificially kicking device queues after restore
-- Various PIT flag combinations
-
-### What we know
-- vCPU state after restore: `mp_state=0` (RUNNABLE), `rflags=0x246` (IF=1), `rip=0xffffffff815e8ed1` (`vm_notify` in virtio_mmio.c)
-- All `KVM_SET_*` ioctls succeed without errors
-- All MSRs read/write successfully (validated return counts)
-- PIT flags are 0 (no HPET_LEGACY)
-- Snapshot file format is self-consistent (header, sizes match)
-- With APICv=N: got 3 MMIO exits initially (one-time), then hung
-- With APICv=Y: zero exits from the start
-- Firecracker's snapshot restore ALSO fails for vsock (different error: "Address in use" — Firecracker binds its own vsock listener)
-
-### What Firecracker does differently (from source analysis)
-1. **60+ MSRs** via `KVM_GET_MSR_INDEX_LIST` (dynamic discovery) — we save ~22 hardcoded
-2. **`KVM_SET_XSAVE2`** (not `KVM_SET_XSAVE`) — newer API with dynamic size
-3. **`KVM_SET_DEBUG_REGS`** — we don't save/restore debug registers
-4. **`KVM_IOEVENTFD`** per virtio queue — Firecracker uses ioeventfd for zero-exit queue notifications
-5. **`KVM_IRQFD`** per device — Firecracker wires device IRQs directly into KVM
-6. **"Artificially kick devices"** — calls `process_virtio_queues()` on each device after restore, logs `[Block:rootfs] notifying queues`
-7. **Device activation** — calls `device.activate(mem, interrupt)` to reinitialize backend threads
-8. No `KVM_SET_IDENTITY_MAP_ADDR` — Firecracker doesn't call this
-
-### Most likely root cause
-The combination of missing ioeventfd/irqfd registration and incomplete MSR list. Without ioeventfd, virtio device notifications require full VM exits. Without a complete MSR list (dynamic via `KVM_GET_MSR_INDEX_LIST`), critical CPU state may not be restored. The APICv interaction (zero exits with APICv=Y vs 3 exits with APICv=N) strongly suggests the virtual APIC page state isn't being correctly synchronized.
-
-### Recommended next steps
-1. Implement `KVM_GET_MSR_INDEX_LIST` to dynamically discover all MSRs the host supports
-2. Add `KVM_SET_DEBUG_REGS` to snapshot save/restore
-3. Consider `KVM_SET_XSAVE2` instead of `KVM_SET_XSAVE`
-4. Test with ioeventfd/irqfd registered for virtio devices after restore
-5. Compare actual byte-level LAPIC state between Firecracker and Flint snapshots
+### 10. SA_RESTART on SIGUSR1 defeated pause mechanism
+**Symptom:** VM pause deadlocks — `kickVcpu()` sends SIGUSR1 but KVM_RUN doesn't return.
+**Root cause:** `SA_RESTART` flag on the signal handler causes the kernel to auto-restart the KVM_RUN ioctl after the handler returns, so it never returns `-EINTR`.
+**Fix:** Remove `SA_RESTART` from the SIGUSR1 handler flags.
 
 ---
 
@@ -116,18 +86,7 @@ The combination of missing ioeventfd/irqfd registration and incomplete MSR list.
 First `sb.exec()` works. Second `sb.exec()` on the same sandbox hangs forever.
 
 ### Likely cause
-The hearth-agent's control channel protocol may only handle one request per connection. After the first exec completes, the agent may close the connection or enter an unexpected state. This needs investigation in `agent/src/main.zig`.
-
----
-
-## Performance comparison
-
-| Operation | Firecracker (old) | Flint fresh boot (current) | Flint snapshot (target) |
-|-----------|------------------|---------------------------|------------------------|
-| Setup | ~60s (download FC) | ~30s (build from source) | Same |
-| Sandbox.create() | ~135ms | ~6s | ~135ms (blocked) |
-| exec() | ~2ms | ~2ms | ~2ms |
-| destroy() | instant | instant | instant |
+The hearth-agent's control channel protocol only handles one request per connection. After the first exec completes, the agent closes the connection or enters an unexpected state. This needs investigation in `agent/src/main.zig`.
 
 ---
 
@@ -139,12 +98,21 @@ The hearth-agent's control channel protocol may only handle one request per conn
 
 ### Modified
 - `src/vm/api.ts` — `FirecrackerApi` → `FlintApi`, Flint-compatible payloads
-- `src/vm/binary.ts` — `getFirecrackerPath()` → `getVmmPath()`
-- `src/vm/snapshot.ts` — `root=/dev/vda rw` in boot args, absolute vsock path, sequential API calls
-- `src/sandbox/sandbox.ts` — `freshBoot()` method, removed thin pool, CLI restore mode
-- `src/cli/setup.ts` — build Flint from source, 5.10.x kernel, removed thin pool
+- `src/vm/binary.ts` — `getFirecrackerPath()` → `getVmmPath()`, prefers bzImage
+- `src/vm/snapshot.ts` — sequential API calls, settle delay before snapshot capture
+- `src/sandbox/sandbox.ts` — snapshot restore path, CLI restore mode, removed thin pool
+- `src/cli/setup.ts` — build Flint from source, download bzImage, removed thin pool
 - `src/cli/hearth.ts` — removed pool command
 - `src/cli/status.ts` — removed thin pool status
+- `vmm/src/seccomp.zig` — added missing syscalls (epoll, nanosleep, statx)
+- `vmm/src/main.zig` — SA_RESTART fix, identity map on restore, pause backoff, exit signal
+- `vmm/src/api.zig` — path validation, memory leak fix, SendCtrlAltDel, accept loop fix
+- `vmm/src/snapshot.zig` — device type validation, mem_size bounds, debug regs, format v2
+- `vmm/src/devices/virtio/blk.zig` — DESC_F_WRITE validation
+- `vmm/src/devices/virtio/net.zig` — DESC_F_WRITE validation
+- `vmm/src/devices/virtio/vsock.zig` — EAGAIN recovery fix
+- `vmm/src/jail.zig` — /dev/kvm permissions (0666 in private namespace)
+- `vmm/src/kvm/vcpu.zig` — dynamic MSR discovery, debug register save/restore
 - Various docs (README, ARCHITECTURE, CLAUDE.md, package.json)
 
 ### Deleted
