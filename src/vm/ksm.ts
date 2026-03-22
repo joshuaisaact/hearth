@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { HearthError } from "../errors.js";
 
 const MAX_PAGES_TO_SCAN = 10000;
 const MAX_SLEEP_MS = 1000;
@@ -7,6 +8,27 @@ const MAX_SLEEP_MS = 1000;
 const KSM_BASE = "/sys/kernel/mm/ksm";
 /** @internal Exported for testing only. */
 export const VALID_KSM_FILES = /^[a-z_]+$/;
+
+export class KsmError extends HearthError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "KsmError";
+  }
+}
+
+export class KsmPermissionError extends KsmError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "KsmPermissionError";
+  }
+}
+
+export class KsmParseError extends KsmError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "KsmParseError";
+  }
+}
 
 export interface KsmStats {
   /** Number of page slots shared (deduplicated originals). */
@@ -34,30 +56,7 @@ export interface KsmTuneOptions {
 
 function validateName(name: string): void {
   if (!VALID_KSM_FILES.test(name)) {
-    throw new Error(`Invalid KSM parameter name: ${name}`);
-  }
-}
-
-function readKsmFile(name: string): string {
-  validateName(name);
-  return readFileSync(`${KSM_BASE}/${name}`, "utf-8").trim();
-}
-
-function shellQuote(s: string): string {
-  return `'${s.replace(/'/g, "'\\''")}'`;
-}
-
-function writeKsmFile(name: string, value: string): void {
-  validateName(name);
-  try {
-    writeFileSync(`${KSM_BASE}/${name}`, value);
-  } catch (err) {
-    if (isPermissionError(err)) {
-      throw new Error(
-        `KSM requires root privileges. Run hearth setup with sudo, or manually: echo ${shellQuote(value)} | sudo tee ${shellQuote(`${KSM_BASE}/${name}`)}`,
-      );
-    }
-    throw err;
+    throw new KsmError(`Invalid KSM parameter name: ${name}`);
   }
 }
 
@@ -66,7 +65,47 @@ function isNodeError(err: unknown): err is NodeJS.ErrnoException {
 }
 
 function isPermissionError(err: unknown): boolean {
-  return isNodeError(err) && err.code === "EACCES";
+  return isNodeError(err) && (err.code === "EACCES" || err.code === "EPERM");
+}
+
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+function wrapPermissionError(err: unknown, path: string, value?: string): never {
+  const hint = value !== undefined
+    ? `echo ${shellQuote(value)} | sudo tee ${shellQuote(path)}`
+    : `cat ${shellQuote(path)}`;
+  throw new KsmPermissionError(
+    `KSM requires root privileges. Run hearth setup with sudo, or manually: ${hint}`,
+    { cause: err },
+  );
+}
+
+function readKsmFile(name: string): string {
+  validateName(name);
+  const path = `${KSM_BASE}/${name}`;
+  try {
+    return readFileSync(path, "utf-8").trim();
+  } catch (err) {
+    if (isPermissionError(err)) {
+      wrapPermissionError(err, path);
+    }
+    throw err;
+  }
+}
+
+function writeKsmFile(name: string, value: string): void {
+  validateName(name);
+  const path = `${KSM_BASE}/${name}`;
+  try {
+    writeFileSync(path, value);
+  } catch (err) {
+    if (isPermissionError(err)) {
+      wrapPermissionError(err, path, value);
+    }
+    throw err;
+  }
 }
 
 function formatBytes(bytes: number): string {
@@ -96,7 +135,7 @@ function parseKsmInt(name: string): number {
   const raw = readKsmFile(name);
   const value = parseInt(raw, 10);
   if (Number.isNaN(value)) {
-    throw new Error(`Failed to parse KSM ${name}: "${raw}"`);
+    throw new KsmParseError(`Failed to parse KSM ${name}: "${raw}"`);
   }
   return value;
 }
@@ -145,10 +184,10 @@ export function getKsmStats(): KsmStats {
 export function tuneKsm(opts: KsmTuneOptions = {}): void {
   const { pagesToScan = 1000, sleepMs = 20 } = opts;
   if (!Number.isInteger(pagesToScan) || pagesToScan < 1 || pagesToScan > MAX_PAGES_TO_SCAN) {
-    throw new Error(`pagesToScan must be an integer between 1 and ${MAX_PAGES_TO_SCAN}, got ${pagesToScan}`);
+    throw new KsmError(`pagesToScan must be an integer between 1 and ${MAX_PAGES_TO_SCAN}, got ${pagesToScan}`);
   }
   if (!Number.isInteger(sleepMs) || sleepMs < 1 || sleepMs > MAX_SLEEP_MS) {
-    throw new Error(`sleepMs must be an integer between 1 and ${MAX_SLEEP_MS}, got ${sleepMs}`);
+    throw new KsmError(`sleepMs must be an integer between 1 and ${MAX_SLEEP_MS}, got ${sleepMs}`);
   }
   writeKsmFile("pages_to_scan", String(pagesToScan));
   writeKsmFile("sleep_millisecs", String(sleepMs));

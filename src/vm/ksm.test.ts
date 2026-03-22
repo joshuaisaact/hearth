@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { enableKsm, getKsmStats, tuneKsm, initKsm, VALID_KSM_FILES } from "./ksm.js";
+import {
+  enableKsm, getKsmStats, tuneKsm, initKsm, VALID_KSM_FILES,
+  KsmPermissionError, KsmParseError, KsmError,
+} from "./ksm.js";
 
 vi.mock("node:fs", () => ({
   readFileSync: vi.fn(),
@@ -41,12 +44,34 @@ describe("enableKsm", () => {
     expect(mockWrite).not.toHaveBeenCalled();
   });
 
-  it("throws a clear error on EACCES", () => {
+  it("throws KsmPermissionError on EACCES", () => {
     stubKsmFiles({ run: "0" });
     mockWrite.mockImplementation(() => {
       throw Object.assign(new Error("EACCES"), { code: "EACCES" });
     });
-    expect(() => enableKsm()).toThrow("KSM requires root privileges");
+    expect(() => enableKsm()).toThrow(KsmPermissionError);
+  });
+
+  it("throws KsmPermissionError on EPERM", () => {
+    stubKsmFiles({ run: "0" });
+    mockWrite.mockImplementation(() => {
+      throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+    });
+    expect(() => enableKsm()).toThrow(KsmPermissionError);
+  });
+
+  it("throws KsmPermissionError on EACCES when reading", () => {
+    mockRead.mockImplementation(() => {
+      throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+    });
+    expect(() => enableKsm()).toThrow(KsmPermissionError);
+  });
+
+  it("throws KsmPermissionError on EPERM when reading", () => {
+    mockRead.mockImplementation(() => {
+      throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+    });
+    expect(() => enableKsm()).toThrow(KsmPermissionError);
   });
 });
 
@@ -97,7 +122,7 @@ describe("getKsmStats", () => {
     expect(stats.memorySaved).toBe("1.5 GB");
   });
 
-  it("throws on unparseable sysfs value", () => {
+  it("throws KsmParseError on unparseable sysfs value", () => {
     stubKsmFiles({
       run: "1",
       pages_shared: "not_a_number",
@@ -106,6 +131,7 @@ describe("getKsmStats", () => {
       full_scans: "0",
     });
 
+    expect(() => getKsmStats()).toThrow(KsmParseError);
     expect(() => getKsmStats()).toThrow('Failed to parse KSM pages_shared: "not_a_number"');
   });
 });
@@ -154,13 +180,13 @@ describe("tuneKsm", () => {
   });
 
   it("rejects invalid pagesToScan", () => {
-    expect(() => tuneKsm({ pagesToScan: 0 })).toThrow("pagesToScan must be an integer between 1 and 10000");
+    expect(() => tuneKsm({ pagesToScan: 0 })).toThrow(KsmError);
     expect(() => tuneKsm({ pagesToScan: -1 })).toThrow("pagesToScan");
     expect(() => tuneKsm({ pagesToScan: 99999 })).toThrow("pagesToScan");
   });
 
   it("rejects invalid sleepMs", () => {
-    expect(() => tuneKsm({ sleepMs: 0 })).toThrow("sleepMs must be an integer between 1 and 1000");
+    expect(() => tuneKsm({ sleepMs: 0 })).toThrow(KsmError);
     expect(() => tuneKsm({ sleepMs: -5 })).toThrow("sleepMs");
     expect(() => tuneKsm({ sleepMs: 9999 })).toThrow("sleepMs");
   });
@@ -172,10 +198,18 @@ describe("initKsm", () => {
     expect(initKsm()).toBe(true);
   });
 
-  it("returns false on permission error without throwing", () => {
+  it("returns false on EACCES without throwing", () => {
     stubKsmFiles({ run: "0" });
     mockWrite.mockImplementation(() => {
       throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+    });
+    expect(initKsm()).toBe(false);
+  });
+
+  it("returns false on EPERM without throwing", () => {
+    stubKsmFiles({ run: "0" });
+    mockWrite.mockImplementation(() => {
+      throw Object.assign(new Error("EPERM"), { code: "EPERM" });
     });
     expect(initKsm()).toBe(false);
   });
