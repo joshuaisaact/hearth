@@ -80,6 +80,29 @@ if (command === "setup") {
 } else if (command === "checkpoint") {
   const { checkpointCommand } = await import("./checkpoint.js");
   await checkpointCommand(process.argv.slice(3));
+} else if (command === "status") {
+  const { getKsmStats } = await import("../vm/ksm.js");
+  const { getThinPoolStatus } = await import("../vm/thin.js");
+
+  try {
+    const ksm = getKsmStats();
+    if (ksm.enabled) {
+      const sharedPages = ksm.pagesSharing.toLocaleString();
+      console.log(`KSM: active — ${ksm.memorySaved} saved (${sharedPages} shared pages, ${ksm.fullScans} full scans)`);
+    } else {
+      console.log("KSM: inactive — run hearth setup as root to enable memory deduplication");
+    }
+  } catch {
+    console.log("KSM: not available");
+  }
+
+  console.log("");
+  const pool = getThinPoolStatus();
+  if (pool) {
+    console.log(`Thin pool: active (${pool.usedDataPercent}% data, ${pool.thinCount} volumes)`);
+  } else {
+    console.log("Thin pool: not active");
+  }
 } else if (command === "pool") {
   const sub = process.argv[3];
   const { isThinPoolAvailable, getThinPoolStatus, destroyThinPool } = await import("../vm/thin.js");
@@ -115,6 +138,7 @@ if (command === "setup") {
   console.log("  claude      Launch Claude Code in an isolated sandbox");
   console.log("  shell       Start an interactive shell in a sandbox");
   console.log("  checkpoint  Save a running sandbox's state (restore with 'hearth claude <name>')");
+  console.log("  status      Show KSM memory deduplication and thin pool status");
   console.log("  daemon      Start the Hearth daemon (for multi-process/remote access)");
   console.log("  connect     Configure remote daemon connection (hearth connect <host>)");
   console.log("  pool        Manage dm-thin snapshot pool (status, destroy)");

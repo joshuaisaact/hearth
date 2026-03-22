@@ -39,3 +39,11 @@ export class ResourceError extends HearthError {
     this.name = "ResourceError";
   }
 }
+
+export function isNodeError(err: unknown): err is NodeJS.ErrnoException {
+  return err instanceof Error && "code" in err;
+}
+
+export function isPermissionError(err: unknown): boolean {
+  return isNodeError(err) && (err.code === "EACCES" || err.code === "EPERM");
+}

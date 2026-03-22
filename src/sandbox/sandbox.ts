@@ -27,7 +27,8 @@ import {
 import { VmBootError, TimeoutError } from "../errors.js";
 import { waitForFile, errorMessage } from "../util.js";
 import type { SpawnHandle } from "../agent/client.js";
-import type { SnapshotInfo, ExecResult, ExecOptions, SpawnOptions } from "./types.js";
+import { initKsm } from "../vm/ksm.js";
+import type { SnapshotInfo, ExecResult, ExecOptions, SpawnOptions, CreateOptions } from "./types.js";
 
 function userSnapshotDir(name: string): string {
   if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
@@ -77,8 +78,9 @@ export class Sandbox {
   }
 
   /** Create a sandbox from the base snapshot. */
-  static async create(): Promise<Sandbox> {
-    await ensureBaseSnapshot();
+  static async create(opts?: CreateOptions): Promise<Sandbox> {
+    initKsm(); // best-effort, idempotent, never throws
+    await ensureBaseSnapshot(opts?.memoryMib);
     return Sandbox.restoreFromDir(getSnapshotDir());
   }
 
