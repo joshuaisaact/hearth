@@ -85,7 +85,7 @@ const commands: Record<string, Command> = {
 const command = process.argv[2];
 const args = process.argv.slice(3);
 
-if (command && command in commands) {
+if (command && Object.hasOwn(commands, command)) {
   await commands[command].run(args);
 } else {
   console.log("Usage: hearth <command>");

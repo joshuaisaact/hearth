@@ -11,6 +11,10 @@ export function connectCommand(args: string[]) {
   const portIdx = flags.indexOf("--port");
   const tokenIdx = flags.indexOf("--token");
   const port = portIdx !== -1 ? parseInt(flags[portIdx + 1], 10) : 9100;
+  if (Number.isNaN(port)) {
+    console.error("--port requires a numeric value");
+    process.exit(1);
+  }
   const token = tokenIdx !== -1 ? flags[tokenIdx + 1] : undefined;
 
   const config = loadConfig();
