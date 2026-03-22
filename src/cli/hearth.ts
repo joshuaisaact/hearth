@@ -53,7 +53,7 @@ const commands: Record<string, Command> = {
     },
   },
   status: {
-    description: "Show KSM memory deduplication and thin pool status",
+    description: "Show KSM memory deduplication status",
     run: async () => {
       const { statusCommand } = await import("./status.js");
       statusCommand();
@@ -71,13 +71,6 @@ const commands: Record<string, Command> = {
     run: async (args) => {
       const { connectCommand } = await import("./connect.js");
       connectCommand(args);
-    },
-  },
-  pool: {
-    description: "Manage dm-thin snapshot pool (status, destroy)",
-    run: async (args) => {
-      const { poolCommand } = await import("./pool.js");
-      poolCommand(args);
     },
   },
 };

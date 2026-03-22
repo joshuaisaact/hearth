@@ -5,12 +5,12 @@ import { ResourceError } from "../errors.js";
 
 const HEARTH_DIR = join(homedir(), ".hearth");
 
-export function getFirecrackerPath(): string {
-  const bundled = join(HEARTH_DIR, "bin", "firecracker");
+export function getVmmPath(): string {
+  const bundled = join(HEARTH_DIR, "bin", "flint");
   if (existsSync(bundled)) return bundled;
 
   throw new ResourceError(
-    "Firecracker binary not found. Run: npx hearth setup",
+    "Flint VMM binary not found. Run: npx hearth setup",
   );
 }
 

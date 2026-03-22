@@ -2,7 +2,7 @@
 
 ## System Overview
 
-Hearth provides local Firecracker microVM sandboxes for AI agent development. The architecture has three main layers:
+Hearth provides local microVM sandboxes for AI agent development, powered by Flint (a custom Zig VMM). The architecture has three main layers:
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -13,8 +13,8 @@ Hearth provides local Firecracker microVM sandboxes for AI agent development. Th
 │  Direct (in-process)  │ Daemon (UDS / WebSocket)
 ├──────────┬──────────┬───────────────────────┤
 │ VM Layer │ Network  │ Storage               │
-│ firecracker│ TAP/NAT │ rootfs + overlays    │
-│ jailer   │ port fwd │ snapshots (CoW)       │
+│ flint    │ TAP/NAT │ rootfs + overlays     │
+│ (Zig VMM)│ port fwd │ snapshots (CoW)       │
 └──────────┴──────────┴───────────────────────┘
          Linux host (KVM + user namespaces)
 ```
@@ -24,11 +24,17 @@ Hearth provides local Firecracker microVM sandboxes for AI agent development. Th
 ### `src/sandbox/`
 The user-facing API. A `Sandbox` represents a running microVM with methods for exec, filesystem access, port forwarding, and lifecycle management. This is the only module that external consumers import.
 
+### `vmm/` (Zig — Flint VMM)
+Custom KVM-based microVMM written in Zig. Built from source during `hearth setup`. Handles:
+- KVM VM lifecycle (boot, pause, resume, snapshot/restore)
+- VirtIO device emulation (block, net, vsock)
+- Built-in jail (mount namespace, pivot_root, cgroups, seccomp)
+- Pre-boot REST API for configuration, post-boot API for control
+
 ### `src/vm/`
-Manages Firecracker processes. Handles:
-- Spawning `firecracker` with the correct config
-- Jailer setup for unprivileged isolation
-- Machine configuration (vCPUs, memory, drives)
+TypeScript layer for VMM interaction. Handles:
+- Spawning `flint` with the correct config
+- Machine configuration (memory, drives)
 - Graceful shutdown and kill
 
 ### `src/snapshot/`
@@ -47,9 +53,9 @@ Networking stack:
 - Optional network isolation (no outbound)
 
 ### `agent/` (Zig — separate from TypeScript SDK)
-Guest agent binary that runs inside the VM. Written in Zig, zero-allocation, ported from flint's agent. Three vsock listeners:
+Guest agent binary that runs inside the VM. Written in Zig, zero-allocation. Four vsock listeners:
 - **Port 1024** (control): exec, writeFile, readFile, ping, interactive spawn. Length-prefixed JSON protocol. Single-threaded, reconnects on snapshot restore.
-- **Port 1025** (forward): TCP port forwarding. Host initiates via Firecracker CONNECT protocol. Agent dials guest localhost, relays bidirectionally via poll(). Fork-per-connection.
+- **Port 1025** (forward): TCP port forwarding. Host initiates via vsock CONNECT protocol. Agent dials guest localhost, relays bidirectionally via poll(). Fork-per-connection.
 - **Port 1026** (transfer): Tar streaming upload/download. Host initiates via CONNECT. Agent fork+exec's busybox tar with vsock fd redirected to stdin/stdout.
 - **Port 1027** (proxy): HTTP CONNECT proxy bridge. Guest TCP listener at 127.0.0.1:3128 relays to host-side proxy over vsock for internet access.
 
@@ -60,12 +66,12 @@ The control channel (port 1024) supports an interactive shell mode used by `hear
 - **PTY → host**: agent reads PTY master output, sends `{"type":"stdout","data":"<base64>"}` messages
 - **host → PTY**: agent reads `{"type":"stdin","data":"<base64>"}` and `{"type":"resize","cols":N,"rows":N}` messages, writes decoded data to PTY master
 
-**vsock POLLIN workaround**: Firecracker's virtio-vsock doesn't reliably trigger `POLLIN` in the guest kernel. The agent sets the vsock socket to `O_NONBLOCK` and tries a non-blocking read every 50ms poll iteration instead of relying on `poll()` to detect incoming host data.
+**vsock POLLIN workaround**: The virtio-vsock device doesn't reliably trigger `POLLIN` in the guest kernel. The agent sets the vsock socket to `O_NONBLOCK` and tries a non-blocking read every 50ms poll iteration instead of relying on `poll()` to detect incoming host data.
 
 ### `src/agent/` (TypeScript — host-side client)
 Host-side client that talks to the guest agent:
 - Control channel: length-prefixed JSON requests over vsock UDS (guest-initiated connection)
-- Port forwarding + transfers: Firecracker CONNECT protocol (host-initiated via `vsockConnect` helper)
+- Port forwarding + transfers: vsock CONNECT protocol (host-initiated via `vsockConnect` helper)
 
 ### `src/daemon/`
 Daemon server and client for multi-process and remote access:
@@ -96,10 +102,10 @@ SDK client (TypeScript)
   ▼
 Backend (in-process, or daemon via UDS / WebSocket)
   │  1. Clone rootfs overlay (cp --reflink=auto)
-  │  2. Spawn firecracker + configure via REST API
+  │  2. Spawn flint VMM (CLI restore or API config)
   │  3. Configure networking (TAP, NAT)
   ▼
-Firecracker microVM
+Flint microVM
   │  Boots in <150ms
   │  Guest agent on vsock
   ▼
@@ -113,9 +119,9 @@ Guest Linux (minimal rootfs)
 See `docs/design-docs/core-beliefs.md` for principles. Notable decisions:
 
 1. **Local-only**: No cloud dependency. Everything runs on the developer's machine.
-2. **Stock Firecracker**: Upstream binary, auto-downloaded. Not containers, not a custom VMM.
+2. **Custom VMM (Flint)**: Zig-based KVM VMM built from source. Not containers, not a third-party binary.
 3. **Snapshot-first**: Fast clone from snapshots is the primary creation path.
 4. **vsock for guest communication**: No network dependency for control plane.
 5. **In-process or daemon**: `Sandbox` manages VMs in-process. `DaemonClient` connects via UDS (local) or WebSocket (remote) for multi-process and macOS access. `hearth shell` auto-starts the daemon if needed.
-6. **Zig guest agent**: Zero-allocation, <1MB binary, ported from flint. Internal component — users never touch it.
+6. **Zig guest agent**: Zero-allocation, <1MB binary. Internal component — users never touch it.
 7. **Observability-first**: Every sandbox gets logs + metrics via Vector (guest) → Victoria (host). Agents query via SDK, not manual tooling. This is the key differentiator vs E2B.

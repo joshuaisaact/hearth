@@ -1,10 +1,10 @@
 import { existsSync, mkdirSync, copyFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { FirecrackerApi } from "./api.js";
+import { FlintApi } from "./api.js";
 import { AgentClient } from "../agent/client.js";
 import {
-  getFirecrackerPath,
+  getVmmPath,
   getKernelPath,
   getRootfsPath,
   getHearthDir,
@@ -18,7 +18,7 @@ export const ROOTFS_NAME = "rootfs.ext4";
 export const VMSTATE_NAME = "vmstate.snap";
 export const MEMORY_NAME = "memory.snap";
 export const VSOCK_NAME = "vsock";
-export const SOCKET_NAME = "firecracker.sock";
+export const SOCKET_NAME = "flint.sock";
 
 /** Default guest memory in MiB. Safe for concurrent sandboxes thanks to KSM page deduplication. */
 export const DEFAULT_MEMORY_MIB = 2048;
@@ -69,7 +69,7 @@ async function createBaseSnapshotIfNeeded(memoryMib: number): Promise<void> {
   const agentConnected = agent.waitForConnection(15000);
 
   const proc = spawn(
-    getFirecrackerPath(),
+    getVmmPath(),
     ["--api-sock", SOCKET_NAME],
     {
       stdio: ["ignore", "pipe", "pipe"],
@@ -94,15 +94,15 @@ async function createBaseSnapshotIfNeeded(memoryMib: number): Promise<void> {
     await waitForFile(join(SNAPSHOT_DIR, SOCKET_NAME), 5000);
   } catch {
     cleanup();
-    throw new VmBootError(`Firecracker failed to start for snapshot creation. stderr: ${stderrBuf.slice(0, 500)}`);
+    throw new VmBootError(`Flint failed to start for snapshot creation. stderr: ${stderrBuf.slice(0, 500)}`);
   }
 
-  const api = new FirecrackerApi(join(SNAPSHOT_DIR, SOCKET_NAME));
+  const api = new FlintApi(join(SNAPSHOT_DIR, SOCKET_NAME));
 
   try {
     // Configure VM — these are independent, run in parallel
     await Promise.all([
-      api.putMachineConfig(2, memoryMib),
+      api.putMachineConfig(1, memoryMib),
       api.putBootSource(
         getKernelPath(),
         "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init",

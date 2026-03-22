@@ -2,7 +2,7 @@
 
 ## What is Hearth?
 
-Local-first Firecracker microVM sandboxes for AI agent development. Think E2B, but runs entirely on your machine. Agents get isolated Linux VMs they can boot, snapshot, exec into, and tear down in milliseconds.
+Local-first microVM sandboxes for AI agent development. Think E2B, but runs entirely on your machine. Agents get isolated Linux VMs they can boot, snapshot, exec into, and tear down in milliseconds.
 
 ## Tech Stack
 
@@ -10,13 +10,14 @@ Local-first Firecracker microVM sandboxes for AI agent development. Think E2B, b
 - **Runtime**: Node.js 20+
 - **Build**: tsc
 - **Test**: vitest
-- **Underlying VM**: Firecracker microVMs via `/dev/kvm`
+- **Underlying VM**: Flint (custom Zig VMM) via `/dev/kvm`
 
 ## Architecture
 
 See `ARCHITECTURE.md` for the full system map. Key layers:
 
-- `src/vm/` — Firecracker process lifecycle, VM configuration, jailer
+- `src/vm/` — VMM interaction, API client, snapshot management
+- `vmm/` — Flint VMM source (Zig), built during setup
 - `src/snapshot/` — Copy-on-write snapshots, restore
 - `src/network/` — TAP device management, port forwarding
 - `src/agent/` — Guest agent protocol (vsock-based)

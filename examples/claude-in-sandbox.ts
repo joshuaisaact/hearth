@@ -2,7 +2,7 @@
  * Example: Running Claude Code inside a Hearth sandbox.
  *
  * This demonstrates the core use case — an AI agent running with full
- * autonomy inside an isolated Firecracker microVM. The agent can:
+ * autonomy inside an isolated microVM. The agent can:
  * - Read and write any file
  * - Install packages
  * - Run arbitrary commands
