@@ -5,7 +5,7 @@ const PROXY_VSOCK_PORT = 1027;
 
 /**
  * HTTP CONNECT proxy that listens on a vsock UDS path.
- * Guest connects via AF_VSOCK → Firecracker proxies to this UDS.
+ * Guest connects via AF_VSOCK → Flint proxies to this UDS.
  * Each connection: guest sends "CONNECT host:port HTTP/1.1\r\n\r\n",
  * host connects to the real server, replies 200, relays bidirectionally.
  */

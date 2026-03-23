@@ -14,16 +14,14 @@ import {
 import { join } from "node:path";
 import { execSync, execFileSync } from "node:child_process";
 import { arch, tmpdir } from "node:os";
-import { download, fetchText } from "./download.js";
+import { download } from "./download.js";
 import { getHearthDir } from "../vm/binary.js";
 import { errorMessage } from "../util.js";
-import { setupThinPool as initThinPool, canUseThinPool } from "../vm/thin.js";
 import { initKsm } from "../vm/ksm.js";
 
 const HEARTH_DIR = getHearthDir();
 const BIN_DIR = join(HEARTH_DIR, "bin");
 const BASES_DIR = join(HEARTH_DIR, "bases");
-const FC_VERSION = "v1.15.0";
 
 function fcArch(): string {
   const a = arch();
@@ -44,11 +42,10 @@ async function main() {
   mkdirSync(BASES_DIR, { recursive: true });
 
   // These three are independent — run in parallel
-  await Promise.all([setupFirecracker(), setupKernel(), setupAgent()]);
+  await Promise.all([setupFlint(), setupKernel(), setupAgent()]);
   // Rootfs depends on agent binary; snapshot depends on rootfs
   await setupRootfs();
   await createBaseSnapshot();
-  await setupThinPool();
   setupKsm();
 
   reportFilesystem();
@@ -60,7 +57,7 @@ async function main() {
 
 function checkKvm() {
   if (!existsSync("/dev/kvm")) {
-    console.error("ERROR: /dev/kvm not found. Firecracker requires KVM.");
+    console.error("ERROR: /dev/kvm not found. Flint requires KVM.");
     console.error("  - Ensure KVM kernel module is loaded: sudo modprobe kvm");
     console.error("  - On a VM, enable nested virtualization");
     process.exit(1);
@@ -76,68 +73,72 @@ function checkKvm() {
   console.log("  /dev/kvm: OK");
 }
 
-async function setupFirecracker() {
-  const fcPath = join(BIN_DIR, "firecracker");
-  if (existsSync(fcPath)) {
-    console.log("  firecracker: already installed");
+async function setupFlint() {
+  const flintPath = join(BIN_DIR, "flint");
+  if (existsSync(flintPath)) {
+    console.log("  flint: already installed");
     return;
   }
 
-  const architecture = fcArch();
-  const tarball = `firecracker-${FC_VERSION}-${architecture}.tgz`;
-  const url = `https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/${tarball}`;
-  const tarPath = join(BIN_DIR, "fc.tgz");
+  // Check for Zig
+  try {
+    execSync("zig version", { stdio: "pipe" });
+  } catch {
+    console.error("ERROR: Zig not found on PATH. Flint requires Zig 0.16+ to build.");
+    console.error("  Install Zig: https://ziglang.org/download/");
+    process.exit(1);
+  }
 
-  console.log(`  firecracker: downloading ${FC_VERSION} for ${architecture}...`);
-  await download(url, tarPath);
+  const vmmDir = findVmmDir();
+  console.log("  flint: building with Zig...");
+  try {
+    execSync("zig build -Doptimize=ReleaseSafe", { cwd: vmmDir, stdio: "pipe" });
+  } catch (err: unknown) {
+    if (err && typeof err === "object" && "stderr" in err) {
+      const stderr = (err as Record<string, unknown>).stderr;
+      if (Buffer.isBuffer(stderr)) console.error(stderr.toString());
+    }
+    throw err;
+  }
+  copyFileSync(join(vmmDir, "zig-out", "bin", "flint"), flintPath);
+  chmodSync(flintPath, 0o755);
+  console.log("  flint: built and installed");
+}
 
-  execSync("tar xzf fc.tgz", { cwd: BIN_DIR, stdio: "pipe" });
-
-  const releaseDir = `release-${FC_VERSION}-${architecture}`;
-  copyFileSync(
-    join(BIN_DIR, releaseDir, `firecracker-${FC_VERSION}-${architecture}`),
-    fcPath,
-  );
-  copyFileSync(
-    join(BIN_DIR, releaseDir, `jailer-${FC_VERSION}-${architecture}`),
-    join(BIN_DIR, "jailer"),
-  );
-  chmodSync(fcPath, 0o755);
-  chmodSync(join(BIN_DIR, "jailer"), 0o755);
-
-  rmSync(join(BIN_DIR, releaseDir), { recursive: true, force: true });
-  rmSync(tarPath, { force: true });
-
-  console.log("  firecracker: installed");
+function findVmmDir(): string {
+  const candidates = [
+    join(import.meta.dirname ?? "", "..", "..", "vmm"),
+    join(process.cwd(), "vmm"),
+  ];
+  for (const dir of candidates) {
+    if (existsSync(join(dir, "build.zig"))) return dir;
+  }
+  throw new Error("Could not find vmm/ directory. Run from the hearth repo root.");
 }
 
 async function setupKernel() {
-  const kernelPath = join(BASES_DIR, "vmlinux");
-  if (existsSync(kernelPath)) {
-    console.log("  kernel: already installed");
+  // Prefer bzImage for snapshot restore support (ELF vmlinux breaks resume from HLT)
+  const bzImagePath = join(BASES_DIR, "bzImage");
+  if (existsSync(bzImagePath)) {
+    console.log("  kernel: already installed (bzImage)");
     return;
   }
 
-  const architecture = fcArch();
-  const ciVersion = FC_VERSION.replace(/\.\d+$/, ""); // v1.15.0 -> v1.15
-
-  console.log("  kernel: finding latest from Firecracker CI...");
-  const listUrl = `http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/${ciVersion}/${architecture}/vmlinux-&list-type=2`;
-  const xml = await fetchText(listUrl);
-
-  const keys = [...xml.matchAll(/<Key>(firecracker-ci\/[^<]+\/vmlinux-[\d.]+)<\/Key>/g)]
-    .map((m) => m[1])
-    .sort();
-
-  if (keys.length === 0) {
-    throw new Error("No kernel found in Firecracker CI S3 bucket");
+  // Also accept legacy ELF vmlinux (fresh boot still works)
+  const vmlinuxPath = join(BASES_DIR, "vmlinux");
+  if (existsSync(vmlinuxPath)) {
+    console.log("  kernel: already installed (vmlinux, no snapshot restore support)");
+    return;
   }
 
-  const latestKey = keys[keys.length - 1];
-  const kernelUrl = `https://s3.amazonaws.com/spec.ccfc.min/${latestKey}`;
-
-  console.log(`  kernel: downloading ${latestKey.split("/").pop()}...`);
-  await download(kernelUrl, kernelPath);
+  // Download pre-built 5.10 bzImage from GitHub releases.
+  // We need bzImage format (not ELF vmlinux) because the kernel's own setup header
+  // is required for snapshot restore — the ELF loader synthesizes boot_params from
+  // scratch, and the synthetic values break resume from HLT after snapshot restore.
+  // The 5.10 kernel is used because it has CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y.
+  const url = "https://github.com/joshuaisaact/hearth/releases/download/kernel-5.10.245/bzImage";
+  console.log("  kernel: downloading bzImage 5.10.245...");
+  await download(url, bzImagePath);
   console.log("  kernel: installed");
 }
 
@@ -233,7 +234,7 @@ async function setupRootfs() {
         "    && rm -rf /var/lib/apt/lists/* \\",
         "    && npm install -g node-gyp \\",
         "    && node-gyp install",
-        "RUN echo 'root:root' | chpasswd",
+        "RUN passwd -l root",
         "RUN useradd -m -s /bin/bash agent",
         "COPY hearth-agent /usr/local/bin/hearth-agent",
         "RUN chmod +x /usr/local/bin/hearth-agent",
@@ -301,20 +302,6 @@ async function createBaseSnapshot() {
   console.log("  snapshot: creating base snapshot (booting VM, ~2s)...");
   await ensureBaseSnapshot();
   console.log("  snapshot: created");
-}
-
-async function setupThinPool() {
-  if (!canUseThinPool()) {
-    console.log("  thin pool: skipped (requires root)");
-    return;
-  }
-
-  const rootfsPath = join(BASES_DIR, "ubuntu-24.04.ext4");
-  if (initThinPool(rootfsPath)) {
-    console.log("  thin pool: active (instant CoW snapshots)");
-  } else {
-    console.log("  thin pool: setup failed (falling back to file copies)");
-  }
 }
 
 function setupKsm() {

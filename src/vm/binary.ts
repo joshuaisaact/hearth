@@ -5,16 +5,21 @@ import { ResourceError } from "../errors.js";
 
 const HEARTH_DIR = join(homedir(), ".hearth");
 
-export function getFirecrackerPath(): string {
-  const bundled = join(HEARTH_DIR, "bin", "firecracker");
+export function getVmmPath(): string {
+  const bundled = join(HEARTH_DIR, "bin", "flint");
   if (existsSync(bundled)) return bundled;
 
   throw new ResourceError(
-    "Firecracker binary not found. Run: npx hearth setup",
+    "Flint VMM binary not found. Run: npx hearth setup",
   );
 }
 
 export function getKernelPath(): string {
+  // Prefer bzImage over ELF vmlinux — bzImage is required for snapshot restore
+  // (the ELF loader's synthetic boot_params breaks resume from HLT)
+  const bzImage = join(HEARTH_DIR, "bases", "bzImage");
+  if (existsSync(bzImage)) return bzImage;
+
   const kernel = join(HEARTH_DIR, "bases", "vmlinux");
   if (existsSync(kernel)) return kernel;
 

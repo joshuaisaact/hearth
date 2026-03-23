@@ -7,19 +7,15 @@ import { execSync } from "node:child_process";
 const HEARTH_DIR = join(homedir(), ".hearth");
 
 describe("hearth setup", () => {
-  it("should have installed firecracker", () => {
-    const fcPath = join(HEARTH_DIR, "bin", "firecracker");
-    expect(existsSync(fcPath)).toBe(true);
-
-    const version = execSync(`${fcPath} --version`, { stdio: "pipe" })
-      .toString()
-      .trim()
-      .split("\n")[0];
-    expect(version).toContain("Firecracker v1.15.0");
+  it("should have installed flint", () => {
+    const flintPath = join(HEARTH_DIR, "bin", "flint");
+    expect(existsSync(flintPath)).toBe(true);
   });
 
   it("should have installed the kernel", () => {
-    expect(existsSync(join(HEARTH_DIR, "bases", "vmlinux"))).toBe(true);
+    const hasBzImage = existsSync(join(HEARTH_DIR, "bases", "bzImage"));
+    const hasVmlinux = existsSync(join(HEARTH_DIR, "bases", "vmlinux"));
+    expect(hasBzImage || hasVmlinux).toBe(true);
   });
 
   it("should have built the rootfs", () => {

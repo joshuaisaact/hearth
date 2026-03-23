@@ -1,15 +1,15 @@
 import { randomBytes } from "node:crypto";
 import {
-  mkdirSync, rmSync, unlinkSync, existsSync, constants, symlinkSync,
+  mkdirSync, rmSync, existsSync, constants,
   readdirSync, readFileSync, writeFileSync,
 } from "node:fs";
 import { copyFile, rename } from "node:fs/promises";
 import { join } from "node:path";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execSync, spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
-import { FirecrackerApi } from "../vm/api.js";
+import { FlintApi } from "../vm/api.js";
 import { AgentClient } from "../agent/client.js";
-import { getFirecrackerPath, getHearthDir } from "../vm/binary.js";
+import { getVmmPath, getKernelPath, getRootfsPath, getHearthDir } from "../vm/binary.js";
 import {
   ensureBaseSnapshot,
   getSnapshotDir,
@@ -20,10 +20,6 @@ import {
   SOCKET_NAME,
 } from "../vm/snapshot.js";
 import { startProxy, PROXY_URL, PROXY_GUEST_PORT } from "../network/proxy.js";
-import {
-  createThinSnapshot, createThinSnapshotFrom, destroyThinSnapshot,
-  isThinPoolAvailable, getThinId, createSnapshotThin, destroySnapshotThin,
-} from "../vm/thin.js";
 import { VmBootError, TimeoutError } from "../errors.js";
 import { waitForFile, errorMessage } from "../util.js";
 import type { SpawnHandle } from "../agent/client.js";
@@ -47,12 +43,11 @@ process.on("exit", () => {
 
 export class Sandbox {
   private process: ChildProcess;
-  private api: FirecrackerApi;
+  private api: FlintApi;
   private agent: AgentClient;
   private runDir: string;
   private sandboxId: string;
   private vsockPath: string;
-  private thinDevice: string | null = null;
   private portForwardServers: net.Server[] = [];
   private proxyServer: net.Server | null = null;
   private internetEnabled = false;
@@ -60,12 +55,11 @@ export class Sandbox {
 
   private constructor(
     proc: ChildProcess,
-    api: FirecrackerApi,
+    api: FlintApi,
     agent: AgentClient,
     runDir: string,
     sandboxId: string,
     vsockPath: string,
-    thinDevice: string | null,
   ) {
     this.process = proc;
     this.api = api;
@@ -73,15 +67,96 @@ export class Sandbox {
     this.runDir = runDir;
     this.sandboxId = sandboxId;
     this.vsockPath = vsockPath;
-    this.thinDevice = thinDevice;
     activeSandboxes.add(this);
   }
 
-  /** Create a sandbox from the base snapshot. */
+  /** Create a sandbox from the base snapshot (fast path, ~135ms). */
   static async create(opts?: CreateOptions): Promise<Sandbox> {
     initKsm(); // best-effort, idempotent, never throws
     await ensureBaseSnapshot(opts?.memoryMib);
     return Sandbox.restoreFromDir(getSnapshotDir());
+  }
+
+  /** Boot a fresh VM from the rootfs (no snapshot restore). */
+  private static async freshBoot(memoryMib: number): Promise<Sandbox> {
+    const id = randomBytes(8).toString("hex");
+    const runDir = join(getHearthDir(), "run", id);
+    mkdirSync(runDir, { recursive: true });
+
+    // Copy rootfs (reflink on btrfs/XFS)
+    const clone = constants.COPYFILE_FICLONE;
+    await copyFile(getRootfsPath(), join(runDir, ROOTFS_NAME), clone);
+
+    const vsockPath = join(runDir, VSOCK_NAME);
+    const agent = new AgentClient(vsockPath);
+    const agentConnected = agent.waitForConnection(15000);
+
+    // Wait for vsock listener to be ready
+    try {
+      await waitForFile(`${vsockPath}_1024`, 2000);
+    } catch {
+      agent.close();
+      rmSync(runDir, { recursive: true, force: true });
+      throw new VmBootError("vsock listener socket not ready");
+    }
+
+    const proc = spawn(
+      getVmmPath(),
+      ["--api-sock", SOCKET_NAME],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+        cwd: runDir,
+        detached: false,
+      },
+    );
+
+    let stderrBuf = "";
+    proc.stderr?.on("data", (chunk: Buffer) => {
+      if (stderrBuf.length < 2000) stderrBuf += chunk.toString();
+    });
+
+    const cleanup = () => {
+      try { proc.kill("SIGKILL"); } catch {}
+      rmSync(runDir, { recursive: true, force: true });
+    };
+
+    try {
+      await waitForFile(join(runDir, SOCKET_NAME), 5000);
+    } catch {
+      cleanup();
+      throw new VmBootError(`Flint failed to start. stderr: ${stderrBuf.slice(0, 500)}`);
+    }
+
+    const api = new FlintApi(join(runDir, SOCKET_NAME));
+
+    try {
+      await api.putMachineConfig(1, memoryMib);
+      await api.putBootSource(
+        getKernelPath(),
+        "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/init root=/dev/vda rw",
+      );
+      await api.putDrive("rootfs", ROOTFS_NAME, true, false);
+      await api.putVsock(100, join(runDir, VSOCK_NAME));
+      await api.start();
+    } catch (err) {
+      cleanup();
+      throw new VmBootError(`Failed to boot VM: ${errorMessage(err)}`);
+    }
+
+    try {
+      await agentConnected;
+    } catch (err) {
+      cleanup();
+      throw new VmBootError(`Agent failed to connect: ${errorMessage(err)}. stderr: ${stderrBuf.slice(0, 500)}`);
+    }
+
+    const pingOk = await agent.ping();
+    if (!pingOk) {
+      cleanup();
+      throw new VmBootError("Agent ping failed after boot");
+    }
+
+    return new Sandbox(proc, api, agent, runDir, id, vsockPath);
   }
 
   /** Create a sandbox from a named user snapshot. */
@@ -111,52 +186,27 @@ export class Sandbox {
   /** Delete a named snapshot. */
   static deleteSnapshot(name: string): void {
     if (name === "base") throw new Error("Cannot delete the base snapshot");
-    // Clean up associated dm-thin snapshot if one exists
-    try {
-      const meta = JSON.parse(readFileSync(join(userSnapshotDir(name), "metadata.json"), "utf-8"));
-      if (typeof meta.thinId === "number") destroySnapshotThin(name);
-    } catch {}
     rmSync(userSnapshotDir(name), { recursive: true, force: true });
   }
 
-  /** Restore a sandbox from a snapshot directory. */
+  /** Restore a sandbox from a snapshot directory using Flint CLI restore mode. */
   private static async restoreFromDir(snapshotDir: string): Promise<Sandbox> {
     const id = randomBytes(8).toString("hex");
     const runDir = join(getHearthDir(), "run", id);
     mkdirSync(runDir, { recursive: true });
 
-    // Try dm-thin for the rootfs (instant CoW), fall back to file copy
-    let thinDevice: string | null = null;
-    if (isThinPoolAvailable()) {
-      // Check if this snapshot has a thin ID (saved from a dm-thin sandbox)
-      let sourceThinId: number | undefined;
-      try {
-        const meta = JSON.parse(readFileSync(join(snapshotDir, "metadata.json"), "utf-8"));
-        if (typeof meta.thinId === "number") sourceThinId = meta.thinId;
-      } catch {}
-
-      thinDevice = sourceThinId !== undefined
-        ? createThinSnapshotFrom(id, sourceThinId)
-        : createThinSnapshot(id);
-    }
-
-    if (thinDevice) {
-      // Thin snapshot for rootfs — only copy vmstate and memory
-      await Promise.all([
-        copyFile(join(snapshotDir, VMSTATE_NAME), join(runDir, VMSTATE_NAME)),
-        copyFile(join(snapshotDir, MEMORY_NAME), join(runDir, MEMORY_NAME)),
-      ]);
-      // Symlink rootfs to the thin device so Firecracker finds it at the expected path
-      symlinkSync(thinDevice, join(runDir, ROOTFS_NAME));
-    } else {
-      // File copy fallback (reflink on btrfs/XFS)
-      const clone = constants.COPYFILE_FICLONE;
-      await Promise.all([
-        copyFile(join(snapshotDir, ROOTFS_NAME), join(runDir, ROOTFS_NAME), clone),
-        copyFile(join(snapshotDir, VMSTATE_NAME), join(runDir, VMSTATE_NAME), clone),
-        copyFile(join(snapshotDir, MEMORY_NAME), join(runDir, MEMORY_NAME), clone),
-      ]);
-    }
+    // Rootfs uses reflink (CoW on btrfs/XFS) — the guest modifies it.
+    // Memory snapshot must NOT use reflink — the VMM mmap's it with MAP_PRIVATE
+    // for demand-paging, and reflinked extents cause restore failures on btrfs
+    // (shared physical blocks interfere with the kernel's page fault handling).
+    // Node.js copyFile uses copy_file_range internally, which does server-side CoW
+    // on btrfs regardless of flags — so we shell out to cp for the memory file.
+    const clone = constants.COPYFILE_FICLONE;
+    await Promise.all([
+      copyFile(join(snapshotDir, ROOTFS_NAME), join(runDir, ROOTFS_NAME), clone),
+      copyFile(join(snapshotDir, VMSTATE_NAME), join(runDir, VMSTATE_NAME)),
+    ]);
+    execSync(`cp --reflink=never -- '${join(snapshotDir, MEMORY_NAME)}' '${join(runDir, MEMORY_NAME)}'`);
 
     const vsockPath = join(runDir, VSOCK_NAME);
     const agent = new AgentClient(vsockPath);
@@ -165,9 +215,24 @@ export class Sandbox {
     // disconnect and reconnect, so 15s gives plenty of headroom.
     const agentConnected = agent.waitForConnection(15000);
 
+    // Ensure the vsock listener socket exists before spawning the VMM.
+    // server.listen() is async — the socket file may not exist immediately.
+    // CLI restore boots the VM instantly, so the listener must be ready.
+    await waitForFile(`${vsockPath}_1024`, 2000);
+
+    // Use Flint CLI restore mode — boots directly into post-boot API mode,
+    // no HTTP roundtrips needed for snapshot loading
     const proc = spawn(
-      getFirecrackerPath(),
-      ["--api-sock", SOCKET_NAME],
+      getVmmPath(),
+      [
+        "--restore",
+        "--vmstate-path", VMSTATE_NAME,
+        "--mem-path", MEMORY_NAME,
+        "--disk", ROOTFS_NAME,
+        "--vsock-cid", "100",
+        "--vsock-uds", VSOCK_NAME,
+        "--api-sock", SOCKET_NAME,
+      ],
       {
         stdio: ["ignore", "pipe", "pipe"],
         cwd: runDir,
@@ -182,39 +247,26 @@ export class Sandbox {
 
     const cleanup = () => {
       try { proc.kill("SIGKILL"); } catch {}
-      if (thinDevice) destroyThinSnapshot(id);
       rmSync(runDir, { recursive: true, force: true });
     };
-
-    try {
-      await waitForFile(join(runDir, SOCKET_NAME), 5000);
-    } catch {
-      cleanup();
-      throw new VmBootError(
-        `Firecracker failed to start. stderr: ${stderrBuf.slice(0, 500)}`,
-      );
-    }
-
-    const api = new FirecrackerApi(join(runDir, SOCKET_NAME));
-    try {
-      await api.loadSnapshot(VMSTATE_NAME, MEMORY_NAME, true);
-    } catch (err) {
-      cleanup();
-      throw new VmBootError(`Failed to load snapshot: ${errorMessage(err)}`);
-    }
 
     try {
       await agentConnected;
     } catch (err) {
       cleanup();
       throw new VmBootError(
-        `Agent failed to reconnect after snapshot restore: ${errorMessage(err)}`,
+        `Agent failed to reconnect after snapshot restore: ${errorMessage(err)}. stderr: ${stderrBuf.slice(0, 500)}`,
       );
     }
 
-    await agent.ping();
+    const pingOk = await agent.ping();
+    if (!pingOk) {
+      cleanup();
+      throw new VmBootError("Agent ping failed after snapshot restore");
+    }
 
-    return new Sandbox(proc, api, agent, runDir, id, vsockPath, thinDevice);
+    const api = new FlintApi(join(runDir, SOCKET_NAME));
+    return new Sandbox(proc, api, agent, runDir, id, vsockPath);
   }
 
   /**
@@ -241,19 +293,7 @@ export class Sandbox {
         rename(join(this.runDir, MEMORY_NAME), join(snapDir, MEMORY_NAME)),
       ];
 
-      // rootfs: dm-thin uses block-level CoW snapshot, file-based uses copy/move
-      let snapshotThinId: number | undefined;
-      if (this.thinDevice) {
-        const sandboxThinId = getThinId(this.sandboxId);
-        if (sandboxThinId === null) {
-          throw new Error("Failed to read thin ID for sandbox");
-        }
-        const thinId = createSnapshotThin(name, sandboxThinId);
-        if (thinId === null) {
-          throw new Error("Failed to create thin snapshot for checkpoint");
-        }
-        snapshotThinId = thinId;
-      } else if (keepRunning) {
+      if (keepRunning) {
         ops.push(copyFile(
           join(this.runDir, ROOTFS_NAME),
           join(snapDir, ROOTFS_NAME),
@@ -265,14 +305,10 @@ export class Sandbox {
 
       await Promise.all(ops);
 
-      const metadata: Record<string, unknown> = {
+      writeFileSync(join(snapDir, "metadata.json"), JSON.stringify({
         name,
         createdAt: new Date().toISOString(),
-      };
-      if (snapshotThinId !== undefined) {
-        metadata.thinId = snapshotThinId;
-      }
-      writeFileSync(join(snapDir, "metadata.json"), JSON.stringify(metadata));
+      }));
     } catch (err) {
       rmSync(snapDir, { recursive: true, force: true });
       throw new Error(`Failed to create snapshot: ${errorMessage(err)}`);
@@ -296,7 +332,8 @@ export class Sandbox {
     this.agent.close();
     this.agent = new AgentClient(this.vsockPath);
     await this.agent.waitForConnection(timeoutMs);
-    await this.agent.ping();
+    const ok = await this.agent.ping();
+    if (!ok) throw new Error("Agent ping failed after reconnect");
   }
 
   /**
@@ -316,10 +353,22 @@ export class Sandbox {
       throw err;
     }
 
-    await this.api.resume();
+    try {
+      await this.api.resume();
+    } catch (err) {
+      // VM is stuck paused — destroy to avoid leaving it in a broken state
+      this.destroySync();
+      throw new Error(`Failed to resume after checkpoint: ${errorMessage(err)}`);
+    }
 
-    // createSnapshot resets the vsock device, so the old connection is dead.
-    await this.reconnectAgent(10000);
+    try {
+      // createSnapshot resets the vsock device, so the old connection is dead.
+      await this.reconnectAgent(10000);
+    } catch (err) {
+      // VM is running but agent is dead — sandbox is unusable
+      this.destroySync();
+      throw new Error(`Failed to reconnect agent after checkpoint: ${errorMessage(err)}`);
+    }
 
     return name;
   }
@@ -445,20 +494,26 @@ export class Sandbox {
 
     return new Promise((resolve, reject) => {
       if (method === "upload") {
-        const tar = spawn("tar", ["c", "-C", hostPath, "."], {
+        const tar = spawn("tar", ["c", "--no-dereference", "-C", hostPath, "."], {
           stdio: ["ignore", "pipe", "ignore"],
         });
         tar.stdout!.pipe(vsock);
-        tar.on("close", () => vsock.end());
+        tar.on("close", (code) => {
+          if (code !== 0 && code !== null) reject(new Error(`tar exited with code ${code}`));
+          else vsock.end();
+        });
         vsock.on("close", () => resolve());
         vsock.on("error", reject);
         tar.on("error", reject);
       } else {
-        const tar = spawn("tar", ["x", "-C", hostPath], {
+        const tar = spawn("tar", ["x", "--no-same-owner", "--no-unsafe-links", "-C", hostPath], {
           stdio: ["pipe", "ignore", "ignore"],
         });
         vsock.pipe(tar.stdin!);
-        tar.on("close", () => resolve());
+        tar.on("close", (code) => {
+          if (code !== 0 && code !== null) reject(new Error(`tar exited with code ${code}`));
+          else resolve();
+        });
         vsock.on("error", reject);
         tar.on("error", reject);
       }
@@ -514,9 +569,6 @@ export class Sandbox {
     }
     try { this.agent.close(); } catch {}
     try { this.process.kill("SIGKILL"); } catch {}
-    if (this.thinDevice) {
-      try { destroyThinSnapshot(this.sandboxId); } catch {}
-    }
     try { rmSync(this.runDir, { recursive: true, force: true }); } catch {}
   }
 
@@ -566,8 +618,12 @@ function wrapCommand(command: string, opts?: { cwd?: string; env?: Record<string
     cmd = `cd ${shellEscape(opts.cwd)} && ${cmd}`;
   }
   if (opts?.env) {
+    const validEnvKey = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
     const exports = Object.entries(opts.env)
-      .map(([k, v]) => `export ${k}=${shellEscape(v)}`)
+      .map(([k, v]) => {
+        if (!validEnvKey.test(k)) throw new Error(`Invalid env var name: ${k}`);
+        return `export ${k}=${shellEscape(v)}`;
+      })
       .join("; ");
     cmd = `${exports}; ${cmd}`;
   }

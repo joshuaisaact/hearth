@@ -1,6 +1,6 @@
 # hearth
 
-Local-first Firecracker microVM sandboxes for AI agent development. Think [E2B](https://e2b.dev), but runs entirely on your machine.
+Local-first microVM sandboxes for AI agent development. Think [E2B](https://e2b.dev), but runs entirely on your machine.
 
 ```typescript
 import { Sandbox } from "hearth";
@@ -11,7 +11,7 @@ console.log(result.stdout);                          // "hello\n"
 await sandbox.destroy();                             // cleanup: kill VM, delete overlay
 ```
 
-Each sandbox is a real Firecracker microVM with its own Linux kernel. Not a container, not a namespace hack. An agent that `rm -rf /` inside a sandbox destroys nothing on your host.
+Each sandbox is a real KVM microVM (powered by Flint, a custom Zig VMM) with its own Linux kernel. Not a container, not a namespace hack. An agent that `rm -rf /` inside a sandbox destroys nothing on your host.
 
 ## Why
 
@@ -19,7 +19,7 @@ Cloud sandboxes (E2B, Daytona, Modal) add latency, cost, and a dependency on som
 
 |  | E2B | Daytona | hearth |
 |---|---|---|---|
-| Isolation | Firecracker | Docker | Firecracker |
+| Isolation | Firecracker | Docker | KVM (Flint) |
 | Create | ~150ms | ~90ms | ~135ms |
 | Exec latency | Network RTT | Network RTT | ~2ms |
 | Cost | $0.05/vCPU-hr | $0.067/hr | Free |
@@ -28,10 +28,10 @@ Cloud sandboxes (E2B, Daytona, Modal) add latency, cost, and a dependency on som
 
 ## How it works
 
-1. **First `Sandbox.create()`**: Boots a fresh Firecracker VM, waits for the guest agent, pauses, captures a snapshot (vmstate + memory + rootfs). Takes ~1s one time.
-2. **Every subsequent create**: Copies the snapshot files (reflink on btrfs/XFS = instant), restores Firecracker from snapshot, agent reconnects over vsock. ~135ms.
+1. **First `Sandbox.create()`**: Boots a fresh VM via the Flint VMM, waits for the guest agent, pauses, captures a snapshot (vmstate + memory + rootfs). Takes ~1s one time.
+2. **Every subsequent create**: Copies the snapshot files (reflink on btrfs/XFS = instant), restores from snapshot via Flint CLI, agent reconnects over vsock. ~135ms.
 3. **`exec()`**: Sends a command to the Zig guest agent over virtio-vsock. Agent forks `/bin/sh -c <cmd>`, captures stdout/stderr, returns base64-encoded result. ~2ms round-trip.
-4. **`destroy()`**: Kills the Firecracker process, deletes the run directory. Process exit handler catches orphans.
+4. **`destroy()`**: Kills the Flint process, deletes the run directory. Process exit handler catches orphans.
 
 ## Requirements
 
@@ -53,7 +53,7 @@ wsl --install && wsl            # one-time
 npx hearth setup
 ```
 
-**macOS** — use a remote Linux host. Firecracker requires KVM which is not available on macOS. Connect to a Linux server running `hearth daemon` over WebSocket:
+**macOS** — use a remote Linux host. Flint requires KVM which is not available on macOS. Connect to a Linux server running `hearth daemon` over WebSocket:
 
 ```bash
 # On your Linux server
@@ -82,7 +82,7 @@ Works over any network where the Mac can reach the server (ZeroTier, Tailscale, 
 npx hearth setup
 ```
 
-Downloads Firecracker v1.15.0, guest kernel, prebuilt agent binary, builds an Ubuntu rootfs via Docker, and captures a base snapshot. Takes ~1-2 minutes on first run, idempotent after that.
+Builds the Flint VMM from source (requires Zig 0.16+), downloads a guest kernel, builds the agent binary, creates an Ubuntu rootfs via Docker, and captures a base snapshot. Takes ~1-2 minutes on first run, idempotent after that.
 
 ## Environments
 
@@ -397,7 +397,7 @@ Environment.remove("my-api");
 ## Architecture
 
 ```
-Host                                      Guest (Firecracker microVM)
+Host                                      Guest (Flint microVM)
 ┌──────────────────────┐                 ┌──────────────────────┐
 │ TypeScript SDK       │                 │ hearth-agent (Zig)   │
 │ Sandbox.create()     │  control (1024) │ - exec via fork/sh   │
@@ -407,7 +407,7 @@ Host                                      Guest (Firecracker microVM)
 │ sandbox.forwardPort()│◄──── vsock ─────│ - reconnect on       │
 │ sandbox.destroy()    │   proxy (1027)  │   snapshot restore   │
 │                      │                 │ - HTTP proxy bridge  │
-│ Firecracker API      │                 │                      │
+│ Flint VMM API        │                 │                      │
 │ Snapshot manager     │                 │ Linux kernel 6.1     │
 │ Process lifecycle    │                 │ Ubuntu 24.04 rootfs  │
 │ (or Daemon client)   │                 │ Node.js 22           │
@@ -431,13 +431,19 @@ src/                    TypeScript SDK
   cli/build.ts          `hearth build` — build environment from Hearthfile
   cli/envs.ts           `hearth envs` — list, inspect, remove environments
   network/proxy.ts      HTTP CONNECT proxy for internet access over vsock
-  vm/api.ts             Firecracker REST API client
+  vm/api.ts             Flint VMM REST API client
   vm/snapshot.ts        Base snapshot creation and management
   vm/binary.ts          Binary/image path resolution
   cli/setup.ts          `npx hearth setup` — downloads and configures everything
   cli/download.ts       HTTP download with progress and redirect handling
   errors.ts             Typed error hierarchy
   util.ts               Shared utilities (encodeMessage, parseFrames, etc.)
+
+vmm/                    Flint VMM (custom Zig microVMM)
+  src/main.zig          KVM VM lifecycle, CLI arg parsing, run loop
+  src/api.zig           REST API server (pre-boot config, post-boot control)
+  src/snapshot.zig      VM snapshot save/restore
+  build.zig             Build configuration
 
 agent/                  Zig guest agent (runs inside VM)
   src/main.zig          vsock control server, exec, file I/O, port forward relay
@@ -537,7 +543,7 @@ See [examples/claude-in-sandbox.ts](examples/claude-in-sandbox.ts) for a complet
 
 Each sandbox is configured with 2 GB of guest memory by default — enough to run `pnpm install`, compile TypeScript, and handle typical AI agent workloads without OOM kills.
 
-Hearth uses **KSM (Kernel Same-page Merging)** to keep actual host memory usage low. Sandboxes restored from the same snapshot share nearly identical memory pages. KSM runs in the kernel and transparently deduplicates these pages across all Firecracker processes. In practice, the unique memory per sandbox is typically 200–500 MB, so running 10 sandboxes costs ~4 GB of host RAM instead of 20 GB.
+Hearth uses **KSM (Kernel Same-page Merging)** to keep actual host memory usage low. Sandboxes restored from the same snapshot share nearly identical memory pages. KSM runs in the kernel and transparently deduplicates these pages across all Flint processes. In practice, the unique memory per sandbox is typically 200–500 MB, so running 10 sandboxes costs ~4 GB of host RAM instead of 20 GB.
 
 KSM is enabled automatically during `hearth setup` (requires root). No configuration needed. You can check current savings with:
 

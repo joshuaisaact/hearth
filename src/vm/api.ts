@@ -1,7 +1,7 @@
 import http from "node:http";
 
-/** Thin client for the Firecracker REST API over Unix socket. */
-export class FirecrackerApi {
+/** Thin client for the Flint VMM REST API over Unix socket. */
+export class FlintApi {
   constructor(private socketPath: string) {}
 
   private request(
@@ -29,7 +29,7 @@ export class FirecrackerApi {
         res.on("data", (chunk) => (data += chunk));
         res.on("end", () => {
           if (res.statusCode && res.statusCode >= 300) {
-            reject(new Error(`Firecracker ${method} ${path}: ${res.statusCode} ${data}`));
+            reject(new Error(`Flint ${method} ${path}: ${res.statusCode} ${data}`));
           } else {
             resolve();
           }
@@ -111,18 +111,4 @@ export class FirecrackerApi {
     });
   }
 
-  loadSnapshot(
-    snapshotPath: string,
-    memFilePath: string,
-    resumeVm: boolean = false,
-  ): Promise<void> {
-    return this.request("PUT", "/snapshot/load", {
-      snapshot_path: snapshotPath,
-      mem_backend: {
-        backend_path: memFilePath,
-        backend_type: "File",
-      },
-      resume_vm: resumeVm,
-    });
-  }
 }
