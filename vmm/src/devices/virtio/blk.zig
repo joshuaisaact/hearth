@@ -176,11 +176,17 @@ pub fn processRequest(self: Self, mem: *Memory, queue: *Queue, head: u16) !void 
                 var file_offset: u64 = sector * SECTOR_SIZE;
                 for (descs[1 .. desc_count - 1]) |desc| {
                     const buf = try mem.slice(@intCast(desc.addr), desc.len);
-                    const rc: isize = @bitCast(linux.pwrite(self.fd, buf.ptr, buf.len, @bitCast(file_offset)));
-                    if (rc < 0) {
-                        status = S_IOERR;
-                        break;
+                    // Retry short writes to prevent silent data loss
+                    var written: u32 = 0;
+                    while (written < desc.len) {
+                        const rc: isize = @bitCast(linux.pwrite(self.fd, buf[written..].ptr, desc.len - written, @bitCast(file_offset + written)));
+                        if (rc <= 0) {
+                            status = S_IOERR;
+                            break;
+                        }
+                        written += @intCast(rc);
                     }
+                    if (status != S_OK) break;
                     file_offset = std.math.add(u64, file_offset, desc.len) catch {
                         status = S_IOERR;
                         break;

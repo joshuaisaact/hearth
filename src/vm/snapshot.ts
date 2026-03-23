@@ -2,7 +2,6 @@ import { existsSync, mkdirSync, copyFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { FlintApi } from "./api.js";
-import { AgentClient } from "../agent/client.js";
 import {
   getVmmPath,
   getKernelPath,
@@ -43,7 +42,12 @@ export function ensureBaseSnapshot(memoryMib: number = DEFAULT_MEMORY_MIB): Prom
     return baseSnapshotReady;
   }
   baseSnapshotMemoryMib = memoryMib;
-  baseSnapshotReady = createBaseSnapshotIfNeeded(memoryMib);
+  baseSnapshotReady = createBaseSnapshotIfNeeded(memoryMib).catch((err) => {
+    // Reset cache so subsequent calls can retry instead of returning the stale rejection
+    baseSnapshotReady = null;
+    baseSnapshotMemoryMib = null;
+    throw err;
+  });
   return baseSnapshotReady;
 }
 
@@ -65,13 +69,12 @@ async function createBaseSnapshotIfNeeded(memoryMib: number): Promise<void> {
   mkdirSync(SNAPSHOT_DIR, { recursive: true });
   copyFileSync(getRootfsPath(), join(SNAPSHOT_DIR, ROOTFS_NAME));
 
-  const agent = new AgentClient(join(SNAPSHOT_DIR, VSOCK_NAME));
-  const agentConnected = agent.waitForConnection(15000);
-
-  // Ensure the vsock listener socket exists before spawning the VMM.
-  // server.listen() in AgentClient is async — the socket file may not
-  // exist immediately after waitForConnection() returns the Promise.
-  await waitForFile(join(SNAPSHOT_DIR, `${VSOCK_NAME}_1024`), 2000);
+  // Don't create a vsock listener for base snapshot creation.
+  // The agent will try to connect but fail (no listener), which is fine —
+  // we only need the guest kernel booted and idle. If we let the agent
+  // connect, the vsock device has active queue state at snapshot time,
+  // which breaks restore (host-side connection fds are gone but guest
+  // virtio driver thinks data is in-flight).
 
   const proc = spawn(
     getVmmPath(),
@@ -119,26 +122,12 @@ async function createBaseSnapshotIfNeeded(memoryMib: number): Promise<void> {
     throw new VmBootError(`Failed to configure VM for snapshot: ${errorMessage(err)}`);
   }
 
-  try {
-    await agentConnected;
-  } catch (err) {
-    cleanup();
-    throw new VmBootError(`Agent failed to connect during snapshot creation: ${errorMessage(err)}`);
-  }
-
-  const ok = await agent.ping();
-  if (!ok) {
-    cleanup();
-    throw new VmBootError("Agent ping failed during snapshot creation");
-  }
-
-  agent.close();
-
-  // Wait briefly for the guest to settle into HLT (idle) after the agent
-  // disconnects. The snapshot captures mp_state — if the vCPU is RUNNABLE
-  // (mid-execution) instead of HALTED (in HLT), restore fails because
-  // KVM can't properly resume mid-instruction context.
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  // Wait for the guest to finish booting and for the vsock device queues
+  // to settle. The agent tries to connect over vsock but there's no host
+  // listener — the connection attempts fail and the guest goes idle.
+  // We need enough time for the failed attempts to complete and the
+  // virtqueue to drain before snapshotting.
+  await new Promise((resolve) => setTimeout(resolve, 8000));
 
   try {
     await api.pause();

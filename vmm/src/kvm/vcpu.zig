@@ -85,8 +85,11 @@ pub fn run(self: Self) !u32 {
 }
 
 /// Get the IO exit data (valid when exit_reason == KVM_EXIT_IO).
-pub fn getIoData(self: Self) IoExit {
+pub fn getIoData(self: Self) ?IoExit {
     const io = self.kvm_run.unnamed_0.io;
+    // Bounds-check: data_offset + count*size must fit in the kvm_run mmap region
+    const total: usize = @as(usize, io.count) * io.size;
+    if (total == 0 or io.data_offset + total > self.kvm_run_mmap_size) return null;
     const base: [*]u8 = @constCast(@ptrCast(@volatileCast(self.kvm_run)));
     return .{
         .direction = io.direction,
@@ -199,20 +202,16 @@ pub const snapshot_msr_indices = [_]u32{
     0xC0000102, // MSR_KERNEL_GS_BASE
 };
 
-/// Populate buffer with all MSRs the host supports, then read their current values.
-/// Uses KVM_GET_MSR_INDEX_LIST for dynamic discovery (like Firecracker) instead
-/// of a hardcoded list, ensuring we capture all CPU state needed for snapshot restore.
+/// Populate buffer with MSR indices and read their current values.
+/// Uses a curated hardcoded list rather than dynamic discovery via
+/// KVM_GET_MSR_INDEX_LIST. Dynamic discovery returns host-specific MSRs
+/// that cause restore failures (KVM_SET_MSRS silently skips read-only
+/// MSRs, leaving CPU in inconsistent state on some hosts).
 pub fn getMsrs(self: Self, buf: *MsrBuffer) !void {
-    // Try dynamic MSR discovery via KVM_GET_MSR_INDEX_LIST on /dev/kvm
-    const discovered = getMsrIndexList(buf);
-
-    if (!discovered) {
-        // Fallback to hardcoded list if dynamic discovery fails
-        buf.nmsrs = snapshot_msr_indices.len;
-        buf.pad = 0;
-        for (snapshot_msr_indices, 0..) |idx, i| {
-            buf.entries[i] = .{ .index = idx, .reserved = 0, .data = 0 };
-        }
+    buf.nmsrs = snapshot_msr_indices.len;
+    buf.pad = 0;
+    for (snapshot_msr_indices, 0..) |idx, i| {
+        buf.entries[i] = .{ .index = idx, .reserved = 0, .data = 0 };
     }
 
     // KVM_GET_MSRS returns the number actually read via the ioctl return value.

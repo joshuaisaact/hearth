@@ -400,10 +400,17 @@ fn handleRw(self: *Self, mem: *Memory, descs: []const Queue.Desc, desc_count: us
 
     if (payload_len == 0 or conn.fd < 0) return;
 
+    // Cap payload_len to actual descriptor data to prevent flow control skew
+    var total_desc_data: u32 = 0;
+    for (descs[1..desc_count]) |desc| {
+        total_desc_data += desc.len;
+    }
+    const effective_payload = @min(payload_len, total_desc_data);
+
     // Flush any pending write buffer first
     if (!conn.flushWriteBuffer()) {
         // Still blocked — stash new data in write buffer
-        var remaining: u32 = payload_len;
+        var remaining: u32 = effective_payload;
         for (descs[1..desc_count]) |desc| {
             if (remaining == 0) break;
             const chunk_len = @min(desc.len, remaining);
@@ -416,7 +423,7 @@ fn handleRw(self: *Self, mem: *Memory, descs: []const Queue.Desc, desc_count: us
     }
 
     // Write payload from data descriptors to host socket
-    var remaining: u32 = payload_len;
+    var remaining: u32 = effective_payload;
     var desc_idx: usize = 1; // start after header descriptor
     while (desc_idx < desc_count) : (desc_idx += 1) {
         if (remaining == 0) break;

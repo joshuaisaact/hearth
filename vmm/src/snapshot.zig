@@ -120,9 +120,6 @@ pub fn save(
     try vcpu.getMsrs(&msrs);
     try writeAll(state_fd, std.mem.asBytes(&msrs));
 
-    const debug_regs = try vcpu.getDebugRegs();
-    try writeAll(state_fd, std.mem.asBytes(&debug_regs));
-
     // vcpu_events last: contains pending exceptions that other GETs might affect
     const events = try vcpu.getVcpuEvents();
     try writeAll(state_fd, std.mem.asBytes(&events));
@@ -226,9 +223,6 @@ pub fn load(
     try readExact(state_fd, std.mem.asBytes(&msrs));
     if (msrs.nmsrs > Vcpu.MAX_MSR_ENTRIES) return error.InvalidSnapshot;
 
-    var debug_regs: c.kvm_debugregs = undefined;
-    try readExact(state_fd, std.mem.asBytes(&debug_regs));
-
     var events: c.kvm_vcpu_events = undefined;
     try readExact(state_fd, std.mem.asBytes(&events));
 
@@ -243,7 +237,6 @@ pub fn load(
     try vcpu.setXcrs(&xcrs);
     try vcpu.setLapic(&lapic);
     try vcpu.setMsrs(&msrs);
-    try vcpu.setDebugRegs(&debug_regs);
     try vcpu.setVcpuEvents(&events);
 
     // KVM_KVMCLOCK_CTRL: notify the host that the guest was paused.
@@ -289,8 +282,8 @@ pub fn load(
         const dev_len = std.mem.readInt(u32, &len_buf, .little);
 
         var dev_buf: [DEVICE_BUF_SIZE]u8 = undefined;
-        // Minimum 16 bytes: device_id(4) + mmio_base(8) + irq(4)
-        if (dev_len < 16 or dev_len > DEVICE_BUF_SIZE) return error.InvalidSnapshot;
+        // Minimum: identity(16) + transport(29) + 3*queue(31) + smallest backend(6) = 144
+        if (dev_len < 144 or dev_len > DEVICE_BUF_SIZE) return error.InvalidSnapshot;
         try readExact(state_fd, dev_buf[0..dev_len]);
 
         // Read device identity from the saved data
@@ -305,10 +298,14 @@ pub fn load(
                 log.err("device type mismatch at slot {}: snapshot has {} but backend is {}", .{ i, dev_type, dev.device_id });
                 return error.InvalidSnapshot;
             }
-            _ = dev.snapshotRestore(dev_buf[0..dev_len]);
+            const consumed = dev.snapshotRestore(dev_buf[0..dev_len]);
+            if (consumed != dev_len) {
+                log.warn("device {} consumed {} bytes but dev_len is {}", .{ i, consumed, dev_len });
+            }
             log.info("restore: device type {} at 0x{x} IRQ {}", .{ dev_type, mmio_base, irq });
         } else {
-            log.warn("snapshot has device type {} at slot {} but no backend was provided", .{ dev_type, i });
+            log.err("snapshot has device type {} at slot {} but no backend was provided", .{ dev_type, i });
+            return error.InvalidSnapshot;
         }
     }
 

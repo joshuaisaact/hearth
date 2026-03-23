@@ -5,7 +5,7 @@ import {
 } from "node:fs";
 import { copyFile, rename } from "node:fs/promises";
 import { join } from "node:path";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execSync, spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
 import { FlintApi } from "../vm/api.js";
 import { AgentClient } from "../agent/client.js";
@@ -92,7 +92,13 @@ export class Sandbox {
     const agentConnected = agent.waitForConnection(15000);
 
     // Wait for vsock listener to be ready
-    await waitForFile(`${vsockPath}_1024`, 2000);
+    try {
+      await waitForFile(`${vsockPath}_1024`, 2000);
+    } catch {
+      agent.close();
+      rmSync(runDir, { recursive: true, force: true });
+      throw new VmBootError("vsock listener socket not ready");
+    }
 
     const proc = spawn(
       getVmmPath(),
@@ -189,13 +195,18 @@ export class Sandbox {
     const runDir = join(getHearthDir(), "run", id);
     mkdirSync(runDir, { recursive: true });
 
-    // Copy snapshot files (reflink on btrfs/XFS)
+    // Rootfs uses reflink (CoW on btrfs/XFS) — the guest modifies it.
+    // Memory snapshot must NOT use reflink — the VMM mmap's it with MAP_PRIVATE
+    // for demand-paging, and reflinked extents cause restore failures on btrfs
+    // (shared physical blocks interfere with the kernel's page fault handling).
+    // Node.js copyFile uses copy_file_range internally, which does server-side CoW
+    // on btrfs regardless of flags — so we shell out to cp for the memory file.
     const clone = constants.COPYFILE_FICLONE;
     await Promise.all([
       copyFile(join(snapshotDir, ROOTFS_NAME), join(runDir, ROOTFS_NAME), clone),
-      copyFile(join(snapshotDir, VMSTATE_NAME), join(runDir, VMSTATE_NAME), clone),
-      copyFile(join(snapshotDir, MEMORY_NAME), join(runDir, MEMORY_NAME), clone),
+      copyFile(join(snapshotDir, VMSTATE_NAME), join(runDir, VMSTATE_NAME)),
     ]);
+    execSync(`cp --reflink=never -- '${join(snapshotDir, MEMORY_NAME)}' '${join(runDir, MEMORY_NAME)}'`);
 
     const vsockPath = join(runDir, VSOCK_NAME);
     const agent = new AgentClient(vsockPath);
@@ -342,10 +353,22 @@ export class Sandbox {
       throw err;
     }
 
-    await this.api.resume();
+    try {
+      await this.api.resume();
+    } catch (err) {
+      // VM is stuck paused — destroy to avoid leaving it in a broken state
+      this.destroySync();
+      throw new Error(`Failed to resume after checkpoint: ${errorMessage(err)}`);
+    }
 
-    // createSnapshot resets the vsock device, so the old connection is dead.
-    await this.reconnectAgent(10000);
+    try {
+      // createSnapshot resets the vsock device, so the old connection is dead.
+      await this.reconnectAgent(10000);
+    } catch (err) {
+      // VM is running but agent is dead — sandbox is unusable
+      this.destroySync();
+      throw new Error(`Failed to reconnect agent after checkpoint: ${errorMessage(err)}`);
+    }
 
     return name;
   }
@@ -471,20 +494,26 @@ export class Sandbox {
 
     return new Promise((resolve, reject) => {
       if (method === "upload") {
-        const tar = spawn("tar", ["c", "-C", hostPath, "."], {
+        const tar = spawn("tar", ["c", "--no-dereference", "-C", hostPath, "."], {
           stdio: ["ignore", "pipe", "ignore"],
         });
         tar.stdout!.pipe(vsock);
-        tar.on("close", () => vsock.end());
+        tar.on("close", (code) => {
+          if (code !== 0 && code !== null) reject(new Error(`tar exited with code ${code}`));
+          else vsock.end();
+        });
         vsock.on("close", () => resolve());
         vsock.on("error", reject);
         tar.on("error", reject);
       } else {
-        const tar = spawn("tar", ["x", "-C", hostPath], {
+        const tar = spawn("tar", ["x", "--no-same-owner", "--no-unsafe-links", "-C", hostPath], {
           stdio: ["pipe", "ignore", "ignore"],
         });
         vsock.pipe(tar.stdin!);
-        tar.on("close", () => resolve());
+        tar.on("close", (code) => {
+          if (code !== 0 && code !== null) reject(new Error(`tar exited with code ${code}`));
+          else resolve();
+        });
         vsock.on("error", reject);
         tar.on("error", reject);
       }
@@ -589,8 +618,12 @@ function wrapCommand(command: string, opts?: { cwd?: string; env?: Record<string
     cmd = `cd ${shellEscape(opts.cwd)} && ${cmd}`;
   }
   if (opts?.env) {
+    const validEnvKey = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
     const exports = Object.entries(opts.env)
-      .map(([k, v]) => `export ${k}=${shellEscape(v)}`)
+      .map(([k, v]) => {
+        if (!validEnvKey.test(k)) throw new Error(`Invalid env var name: ${k}`);
+        return `export ${k}=${shellEscape(v)}`;
+      })
       .join("; ");
     cmd = `${exports}; ${cmd}`;
   }

@@ -94,9 +94,9 @@ async function setupFlint() {
   try {
     execSync("zig build -Doptimize=ReleaseSafe", { cwd: vmmDir, stdio: "pipe" });
   } catch (err: unknown) {
-    const e = err as { stderr?: Buffer };
-    if (e.stderr) {
-      console.error(e.stderr.toString());
+    if (err && typeof err === "object" && "stderr" in err) {
+      const stderr = (err as Record<string, unknown>).stderr;
+      if (Buffer.isBuffer(stderr)) console.error(stderr.toString());
     }
     throw err;
   }
@@ -234,7 +234,7 @@ async function setupRootfs() {
         "    && rm -rf /var/lib/apt/lists/* \\",
         "    && npm install -g node-gyp \\",
         "    && node-gyp install",
-        "RUN echo 'root:root' | chpasswd",
+        "RUN passwd -l root",
         "RUN useradd -m -s /bin/bash agent",
         "COPY hearth-agent /usr/local/bin/hearth-agent",
         "RUN chmod +x /usr/local/bin/hearth-agent",

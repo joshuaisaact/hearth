@@ -870,11 +870,14 @@ fn runLoop(vcpu: *Vcpu, serial: *Serial, vm: *const Vm, mem: *Memory, devices: *
                         log.info("vCPU paused by API request", .{});
                         var spin_count: u32 = 0;
                         while (rt.paused.load(.acquire)) {
+                            if (rt.exited.load(.acquire)) {
+                                log.info("vCPU exiting while paused (signaled)", .{});
+                                return;
+                            }
                             spin_count += 1;
                             if (spin_count < 1000) {
                                 std.atomic.spinLoopHint();
                             } else {
-                                // Back off to avoid burning CPU during snapshot I/O
                                 const ts = std.os.linux.timespec{ .sec = 0, .nsec = 1_000_000 }; // 1ms
                                 _ = std.os.linux.nanosleep(&ts, null);
                             }
@@ -937,7 +940,7 @@ fn runLoop(vcpu: *Vcpu, serial: *Serial, vm: *const Vm, mem: *Memory, devices: *
 
         switch (exit_reason) {
             c.KVM_EXIT_IO => {
-                const io = vcpu.getIoData();
+                const io = vcpu.getIoData() orelse continue;
 
                 if (io.port >= Serial.COM1_PORT and io.port < Serial.COM1_PORT + Serial.PORT_COUNT) {
                     const is_write = io.direction == c.KVM_EXIT_IO_OUT;
@@ -951,9 +954,7 @@ fn runLoop(vcpu: *Vcpu, serial: *Serial, vm: *const Vm, mem: *Memory, devices: *
                     }
                 } else if (io.direction == c.KVM_EXIT_IO_IN) {
                     // Return 0xFF for unhandled IN ports (= no device present).
-                    // Without this, the kernel's 8250 serial driver detects phantom
-                    // UARTs at COM2/COM3/COM4 and spins trying to initialize them.
-                    const total = @as(u32, io.count) * io.size;
+                    const total: usize = @as(usize, io.count) * io.size;
                     @memset(io.data[0..total], 0xFF);
                 }
             },

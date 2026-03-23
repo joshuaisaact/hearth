@@ -635,14 +635,13 @@ fn handleVmPatch(
         log.info("VM paused", .{});
         respondOk(request);
     } else if (std.mem.eql(u8, parsed.value.state, "Resumed")) {
-        // Clear ack_paused first so the next pause must wait for a fresh ack
-        runtime.ack_paused.store(false, .release);
-
         // Atomically transition true→false; rejects if not paused
         if (runtime.paused.cmpxchgStrong(true, false, .acq_rel, .acquire) != null) {
             respondError(request, .bad_request, "VM is not paused");
             return;
         }
+        // Clear ack_paused after unpausing so the next pause must wait for a fresh ack
+        runtime.ack_paused.store(false, .release);
         log.info("VM resumed", .{});
         respondOk(request);
     } else {
@@ -764,6 +763,7 @@ fn handlePostBootAction(
         // Signal the VM to exit by setting the exited flag.
         // The VMM doesn't emulate i8042/ACPI, so we can't inject Ctrl+Alt+Del.
         // Instead, mark the VM as exited so the run loop terminates.
+        runtime.vcpu.kvm_run.immediate_exit = 1;
         runtime.exited.store(true, .release);
         // Kick the vCPU thread out of KVM_RUN so it sees the exited flag
         runtime.kickVcpu();

@@ -180,6 +180,19 @@ pub fn snapshotRestore(self: *Self, buf: []const u8) usize {
 
     std.debug.assert(pos == IDENTITY_SIZE + TRANSPORT_STATE_SIZE + Queue.SNAPSHOT_SIZE * 3);
 
+    // For vsock devices, sync the host-side queue tracking indices with the
+    // guest's used ring. After snapshot restore, any in-flight descriptors from
+    // prior connections are stale (the host-side fds are gone). By setting
+    // last_avail_idx = next_used_idx (from restored state), we tell the host
+    // to skip all descriptors that were pending at snapshot time, effectively
+    // draining the stale queue. The guest driver will post fresh descriptors
+    // when the agent reconnects.
+    if (self.device_id == virtio.DEVICE_ID_VSOCK) {
+        for (&self.queues) |*q| {
+            q.last_avail_idx = q.next_used_idx;
+        }
+    }
+
     // Skip backend-specific data (already used during init)
     switch (self.backend) {
         .blk => pos += 8,
